@@ -1,0 +1,3282 @@
+﻿script "CDB_API.lib"
+//>GLOBALS
+global gCDBresultA, gCSIconfigA, gCSIdatabaseA, gCSIindexTableIDA
+global gCSIindexTableNameA, gCSIindexTeamIDA, gCSIteamDataA
+
+//>LOCALS
+local sAttemptedToCorrectFlag
+
+
+on libraryStack
+     csi_debugOutput "...Loading:" && the short name of this stack
+     
+     if the long name of me is not in the long name of the target then pass libraryStack
+     if ("CDB_Starter.lib" is not in the stacksInUse) or not(csi_checkAuthentication()) then
+          --UNAUTHORIZED ENTRY
+          stop using me
+          exit to top
+     end if
+end libraryStack
+
+
+on saveStackRequest
+     if "/libraries/CDB_API.lib" is not in the long name of the target or \
+           not(exists(stack "dev tools")) then pass saveStackRequest
+     
+     try
+          put base64Encode(csi_encrypt("client","transportDetails")) into gCSIconfigA["CassiaDB"]["coreValues"]["system"] --server, client
+          put base64Encode(csi_encrypt(csi_VerboseTime(),"transportDetails")) into gCSIconfigA["CassiaDB"]["coreValues"]["sdkBuildDate"] --build date
+          put base64Encode(csi_encrypt("disk","transportDetails")) into gCSIconfigA["CassiaDB"]["coreValues"]["transportPipe"] --disk, ram disk, socket
+          put base64Encode(csi_encrypt("lson","transportDetails")) into gCSIconfigA["CassiaDB"]["coreValues"]["transportFormat"] --lson or json
+          put base64Encode(csi_encrypt("liveCode","transportDetails")) into gCSIconfigA["CassiaDB"]["coreValues"]["sdkPlatform"] --liveCode, REST, Java
+          put base64Encode(csi_encrypt(".3","transportDetails")) into gCSIconfigA["CassiaDB"]["coreValues"]["clientAPIVersion"] --client API version
+          put base64Encode(csi_encrypt(".3","transportDetails")) into gCSIconfigA["CassiaDB"]["coreValues"]["serverAPIVersion"] --server API version
+          put base64Encode(csi_encrypt("10000","transportDetails")) into gCSIconfigA["CassiaDB"]["coreValues"]["keySizeLimit"] --keySizeLimit
+          put base64Encode(csi_encrypt(the platform && the systemVersion,"transportDetails")) into gCSIconfigA["CassiaDB"]["coreValues"]["systemVersion"] --MacOS 10.11.5
+          csi_saveConfig gCSIconfigA
+     catch tError
+          answer "Could not update build date. Probably missing encryption routines."
+     end try
+     
+     pass saveStackRequest
+end saveStackRequest
+
+
+
+private command _____CREATE
+end _____CREATE
+function cdb_createLocal pInputA
+     local tArrayA, tErrorA, tResultA, tTableID, tTeamID
+     
+     --CHECK CONTEXT FOR EACH TABLE ID
+     if not(csi_checkContext("cdb_createLocal",pInputA["cdbTableName"],tTeamID)) then return empty //INVALID teamID, TABLENAME, OR BOTH
+     
+     if the num of elements of pInputA <= 1 then
+          --SAVE RESULTS
+          put false into tErrorA["completed"]
+          put "You must provide data in order to create a record." into tErrorA["response"]
+          put "cdb_createLocal" into tErrorA["context"]
+          csi_saveResult tErrorA
+          exit cdb_createLocal
+     end if
+     
+     --GET tableID
+     put cdb_getTableID(pInputA["cdbTableName"]) into tTableID
+     delete var pInputA["cdbTableName"]
+     
+     --MASSAGE DATA FOR BATCH
+     repeat for each key xKey in pInputA
+          put pInputA[xKey] into tArrayA[tTableID][1][xKey]
+     end repeat
+     
+     put cdb_batchCreateLocal(tArrayA) into tResultA
+     
+     --RETURN RESULTS
+     return the keys of tResultA[tTableID]
+end cdb_createLocal
+
+
+function cdb_createCloud pInputA
+     local tArrayA, tResultA, tTableID
+     
+     --CHECK CONTEXT FOR EACH TABLE ID
+     if not(csi_checkContext("cdb_createCloud",pInputA["cdbTableName"],pInputA["cdbTeamID"])) then return empty //INVALID teamID, TABLENAME, OR BOTH
+     
+     --GET tableID
+     put cdb_getTableID(pInputA["cdbTableName"]) into tTableID
+     delete var pInputA["cdbTableName"]
+     delete var pInputA["cdbTeamID"]
+     
+     --MASSAGE DATA FOR BATCH
+     repeat for each key xKey in pInputA
+          put pInputA[xKey] into tArrayA[tTableID][1][xKey]
+     end repeat
+     
+     put cdb_batchCreateCloud(tArrayA) into tResultA
+     
+     --RETURN RESULTS
+     return the keys of tResultA[tTableID]
+end cdb_createCloud
+
+
+function cdb_batchCreateLocal pInputA
+     local tDateCreated, tDateModified, tErrorA, tErrorCheckingMode
+     local tRecordClusterA, tRecordVersion, tReturnDataA, tTableName
+     local tTeamID
+     
+     --ERROR CHECKING MODE
+     if pInputA["errorChecking"] is empty then put true into tErrorCheckingMode else put pInputA["errorChecking"] into tErrorCheckingMode
+     delete var pInputA["errorChecking"]
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_batchCreateLocal" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     --VERIFY DEV IS SENDING AN ARRAY
+     if pInputA is not an array then
+          put "pInputA is not an array." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     --CHECK CONTEXT FOR EACH TABLE ID
+     if tErrorCheckingMode then
+          repeat for each key xTableID in pInputA
+               put gCSIindexTableNameA[xTableID] into tTableName
+               if not(csi_checkContext("cdb_batchCreateLocal",tTableName,tTeamID)) then return empty //INVALID teamID, TABLENAME, OR BOTH
+          end repeat
+     end if
+     
+     --VERIFY RECORD IDS IF PASSED IN ARRAY
+     --GENEREATE RECORD IDS IF NEEDED
+     --ADD TIMING VALUES TO EACH RECORD
+     --TABLE NAME
+     repeat for each key xTableID in pInputA
+          repeat for each key xIndexKey in pInputA[xTableID]
+               --IF THIS CALL IS FROM THE SERVER PROCESSING AN INCOMING CREATE
+               --PRESERVE recordVersion
+               if pInputA[xTableID][xIndexKey]["csi"]["recordVersion"] is not empty then \
+                     put pInputA[xTableID][xIndexKey]["csi"]["recordVersion"] into tRecordVersion
+               --PRESERVE cdbRecordID
+               if pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"] is not empty then \
+                     put pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"] into pInputA[xTableID][xIndexKey]["cdbRecordID"]
+               --PRESERVE cdbDateCreated
+               if pInputA[xTableID][xIndexKey]["cdb"]["cdbDateCreated"] is not empty then \
+                     put pInputA[xTableID][xIndexKey]["cdb"]["cdbDateCreated"] into tDateCreated
+               --PRESERVE cdbDateModified
+               if pInputA[xTableID][xIndexKey]["cdb"]["cdbDateModified"] is not empty then \
+                     put pInputA[xTableID][xIndexKey]["cdb"]["cdbDateModified"] into tDateModified
+               
+               --CLEAN OUT THESE DETAILS TO PREVENT DEV FROM TRYING TO INJECT DATA IN THERE
+               --BYPASSING THE SCHEMA CHECK
+               delete var pInputA[xTableID][xIndexKey]["csi"]
+               delete var pInputA[xTableID][xIndexKey]["cdb"]
+               
+               --BRING BACK cdbRecordID IF PRESERVED
+               if pInputA[xTableID][xIndexKey]["cdbRecordID"] is not empty then
+                    --MOVE cdbRecordID TO IS NATURAL PLACE
+                    put line 1 of pInputA[xTableID][xIndexKey]["cdbRecordID"] into pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"]
+                    delete var pInputA[xTableID][xIndexKey]["cdbRecordID"]
+                    
+                    --CHECK THE PASSED RECORD ID IF IT IS PASSED IN DEV ARRAY
+                    if tErrorCheckingMode then
+                         if not(csi_checkRecordID("cdb_batchCreateLocal",pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"],false,xTableID,tTeamID)) then
+                              return empty //INVALID RECORD ID, OR RECORD DOES NOT EXIST
+                         end if
+                    end if
+               else
+                    --GENERATE A RECORD ID FOR THIS RECORD BECAUSE ONE WAS NOT PASSED IN DEV ARRAY
+                    delete var pInputA[xTableID][xIndexKey]["cdbRecordID"]
+                    put the UUID() into pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"]
+               end if
+               
+               --ADD cdbTIMING VALUES
+               if pInputA[xTableID][xIndexKey]["cdb"]["cdbDateCreated"] is empty then \
+                     put the seconds into pInputA[xTableID][xIndexKey]["cdb"]["cdbDateCreated"] else \
+                     put tDateCreated into pInputA[xTableID][xIndexKey]["cdb"]["cdbDateCreated"]
+               
+               if pInputA[xTableID][xIndexKey]["cdb"]["cdbDateModified"] is empty then \
+                     put the seconds into pInputA[xTableID][xIndexKey]["cdb"]["cdbDateModified"] else \
+                     put tDateModified into pInputA[xTableID][xIndexKey]["cdb"]["cdbDateModified"]
+               
+               --ADD TABLE DATA
+               put gCSIindexTableNameA[xTableID] into pInputA[xTableID][xIndexKey]["cdb"]["cdbTableName"]
+               put xTableID into pInputA[xTableID][xIndexKey]["cdb"]["cdbTableID"]
+               
+               --ADD RECORD VERSION
+               if tRecordVersion is empty then \
+                     put 1 into pInputA[xTableID][xIndexKey]["csi"]["recordVersion"] else \
+                     put tRecordVersion into pInputA[xTableID][xIndexKey]["csi"]["recordVersion"]
+          end repeat
+          
+          --VALIDATE THE KEYS AGAINST THE SCHEMA
+          --csi_checkAgainstSchema: pExecutionContext, pInputA, pSchema
+          --GET SCHEMA: pForm, pTableName, pTeamID
+          if tErrorCheckingMode then
+               if not(csi_checkAgainstSchema("cdb_batchCreateLocal",pInputA[xTableID][xIndexKey],\
+               csi_getSchema("advanced",gCSIindexTableNameA[xTableID],gCSIindexTeamIDA[xTableID]))) then return empty
+          end if
+     end repeat
+     
+     --SAVE CHANGES BACK TO LOCAL DATABASE ARRAY
+     repeat for each key xTableID in pInputA
+          repeat for each key xIndexKey in pInputA[xTableID]
+               put pInputA[xTableID][xIndexKey] into gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of (pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"])] [pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"]]
+               
+               --BUILD A LIST OF RECORD CLUSTERS TO BE PASSED TO csi_saveRAMToDisk
+               put empty into tRecordClusterA[char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of (pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"])]
+               
+               --BUILD A LIST OF RECORD IDS AND RELATIVE TABLE IDS
+               --WILL BE RETURNED TO DEV AT THE END OF THIS API
+               put empty into tReturnDataA[xTableID][pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"]]
+          end repeat
+          
+          --SAVE FILE LOCALLY
+          csi_saveRAMToDisk tRecordClusterA,xTableID
+          delete var tRecordClusterA
+     end repeat
+     
+     --SAVE RESULTS
+     if not cdb_result() then
+          put false into tErrorA["completed"]
+          put "Could not write record to disk." into tErrorA["response"]
+          put "cdb_createLocal" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     else
+          put true into tErrorA["completed"]
+          put empty into tErrorA["response"]
+          put "cdb_createLocal" into tErrorA["context"]
+          csi_saveResult tErrorA
+          
+          --RETURN RECORD IDS COLLATED WITH TABLE IDS
+          return tReturnDataA
+     end if
+end cdb_batchCreateLocal
+
+
+function cdb_batchCreateCloud pInputA
+     local tErrorA, tParametersA, tResultA, tReturnDataA, tTableName
+     local tTeamID
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_batchCreateLocal" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     --VERIFY DEV IS SENDING AN ARRAY
+     if pInputA is not an array then
+          put "pInputA is not an array." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     --CHECK CONTEXT FOR EACH TABLE ID
+     repeat for each key xTableID in pInputA
+          put gCSIindexTableNameA[xTableID] into tTableName
+          if not(csi_checkContext("cdb_batchCreateCloud",tTableName,tTeamID)) then return empty //INVALID teamID, TABLENAME, OR BOTH
+     end repeat
+     
+     --VERIFY RECORD IDS IF PASSED IN ARRAY
+     --GENEREATE RECORD IDS IF NEEDED
+     --ADD TIMING VALUES TO EACH RECORD
+     --TABLE NAME
+     repeat for each key xTableID in pInputA
+          repeat for each key xIndexKey in pInputA[xTableID]
+               --CLEAN OUT THESE DETAILS TO PREVENT DEV FROM TRYING TO INJECT DATA IN THERE
+               --BYPASSING THE SCHEMA CHECK
+               delete var pInputA[xTableID][xIndexKey]["csi"]
+               delete var pInputA[xTableID][xIndexKey]["cdb"]
+               
+               --VERIFY EACH RECORD ID IN EACH TABLE ID PROVIDED
+               if pInputA[xTableID][xIndexKey]["cdbRecordID"] is not empty then
+                    --MOVE cdbRecordID TO IS NATURAL PLACE
+                    put line 1 of pInputA[xTableID][xIndexKey]["cdbRecordID"] into pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"]
+                    delete var pInputA[xTableID][xIndexKey]["cdbRecordID"]
+                    
+                    --CHECK THE PASSED RECORD ID IF IT IS PASSED IN DEV ARRAY
+                    if not(csi_checkRecordID("cdb_batchCreateLocal",pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"],false,xTableID,tTeamID)) then
+                         return empty //INVALID RECORD ID, OR RECORD DOES NOT EXIST
+                    end if
+               else
+                    --GENERATE A RECORD ID FOR THIS RECORD BECAUSE ONE WAS NOT PASSED IN DEV ARRAY
+                    delete var pInputA[xTableID][xIndexKey]["cdbRecordID"]
+                    put the UUID() into pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"]
+               end if
+               
+               --REMEMBER cdbRecordIDs TO REPORT BACK TO DEV
+               put empty into tReturnDataA[xTableID][pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"]]
+               
+               --ADD cdbTIMING VALUES
+               put the seconds into pInputA[xTableID][xIndexKey]["cdb"]["cdbDateCreated"]
+               put the seconds into pInputA[xTableID][xIndexKey]["cdb"]["cdbDateModified"]
+               
+               --ADD TABLE DATA
+               put gCSIindexTableNameA[xTableID] into pInputA[xTableID][xIndexKey]["cdb"]["cdbTableName"]
+               put xTableID into pInputA[xTableID][xIndexKey]["cdb"]["cdbTableID"]
+               
+               --ADD RECORD VERSION
+               put 1 into pInputA[xTableID][xIndexKey]["csi"]["recordVersion"]
+          end repeat
+          
+          --VALIDATE THE KEYS AGAINST THE SCHEMA
+          --csi_checkAgainstSchema: pExecutionContext, pInputA, pSchema
+          --GET SCHEMA: pForm, pTableName, pTeamID
+          if not(csi_checkAgainstSchema("cdb_batchCreateLocal",pInputA,\
+          csi_getSchema("advanced",gCSIindexTableNameA[xTableID],gCSIindexTeamIDA[xTableID]))) then return empty
+     end repeat
+     
+     --SAVE HYPER-BLOBS
+     repeat for each key xTableID in pInputA
+          repeat for each key xIndexKey in pInputA[xTableID]
+               if offset(":hyperblob",the keys of pInputA[xTableID][xIndexKey]) > 0 then
+                    csi_manageHyperBlob pInputA[xTableID][xIndexKey],"create",gCSIindexTablenameA[xTableID],gCSIindexTeamIDA[xTableID]
+                    if not cdb_result() then
+                         put false into tErrorA["completed"]
+                         put "One or more HyperBlobs could not be created; Your records have been created without HyperBlobs." into tErrorA["response"]
+                         put "cdb_batchCreateCloud" into tErrorA["context"]
+                         csi_saveResult tErrorA
+                         return empty
+                    end if
+               end if
+          end repeat
+     end repeat
+     
+     --BUILD PACKAGE
+     put "createCloud" into tParametersA["requestType"]
+     put gCSIteamDataA[tTeamID][tTableName]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put tTeamID into tParametersA["teamID"]
+     put tTableName into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer pInputA,tParametersA,"ignore"
+     put the result into tResultA
+     
+     --SAVE RESULTS
+     if not cdb_result() then
+          put false into tErrorA["completed"]
+          put "Could not write record to cloud." into tErrorA["response"]
+          put "cdb_batchCreateCloud" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     else
+          put true into tErrorA["completed"]
+          put empty into tErrorA["response"]
+          put "cdb_batchCreateCloud" into tErrorA["context"]
+          csi_saveResult tErrorA
+          
+          --RETURN RECORD IDS COLLATED WITH TABLE IDS
+          return tReturnDataA
+     end if
+end cdb_batchCreateCloud
+
+
+function cdb_superBatch pInputA
+     //     local tAPI, tDevArrayA, tErrorA, tParametersA, tPrimaryKeyList
+     //     local tRecordID, tTableName, tTeamID
+     
+     //     //pInputA
+     //     --KEY 1: Numeric index
+     //     --KEY 2: API
+     //     --KEY 3: databaseName
+     //     --KEY 5: data in array form
+     
+     //     //pErrorBehavior
+     //     --'rollBack': If an error in encountered, roll back to last stable position
+     //     --'ignore': Process requests that can be processed and ignore errors
+     
+     //     --IS THIS A MULTIDIMENSIONAL ARRAY
+     //     if not csi_isMultidimentionalArray(pInputA) then
+     //          put false into tErrorA["completed"]
+     //          put "Only multi-dimensional arrays can be used with cdb_superBatch." into tErrorA["response"]
+     //          put "cdb_superBatch" into tErrorA["context"]
+     //          csi_saveResult tErrorA
+     //          return empty
+     //     end if
+     
+     //     put cdb_getTeamIDs() into tTeamID
+     
+     //     if line 1 of the keys of pInputA is a number then
+     //          put the keys of pInputA into tPrimaryKeyList
+     //          sort tPrimaryKeyList ascending numeric
+     
+     //          --PROCESS LOCAL CALLS
+     //          repeat for each line xPrimaryKey in tPrimaryKeyList
+     //               put the keys of pInputA[xPrimaryKey] into tAPI
+     //               put the keys of pInputA[xPrimaryKey][tAPI] into tTableName
+     //               put pInputA[xPrimaryKey][tAPI][tTableName] into tDevArrayA
+     //               switch tAPI
+     //                    case "cdb_createLocal"
+     //                         put cdb_createLocal(tDevArrayA,tTableName,tTeamID) & lf after sDevResultsA["cdb_createLocal"]["success"]
+     //                         delete var pInputA[xPrimaryKey]
+     //                         break
+     
+     //                    case "cdb_readLocal"
+     //                         put tDevArrayA["cdbRecordID"] into tRecordID
+     //                         put cdb_readLocal(tRecordID,tTableName,tTeamID) & lf after sDevResultsA["cdb_readLocal"]
+     //                         delete var pInputA[xPrimaryKey]
+     //                         break
+     
+     //                    case "cdb_updateLocal"
+     //                         put cdb_updateLocal(tDevArrayA,tTableName,tTeamID) & lf after sDevResultsA["cdb_updateLocal"]
+     //                         delete var pInputA[xPrimaryKey]
+     //                         break
+     
+     //                    case "cdb_deleteLocal"
+     //                         put tDevArrayA["cdbRecordID"] into tRecordID
+     //                         put cdb_deleteLocal(tRecordID,tTableName,tTeamID) & lf after sDevResultsA["cdb_deleteLocal"]
+     //                         delete var pInputA[xPrimaryKey]
+     //                         break
+     
+     //                         -----
+     
+     //                    case "cdb_createCloud"
+     //                    case "cdb_updateCloud"
+     //                    case "cdb_readCloud"
+     //                    case "cdb_deleteCloud"
+     //                         next repeat
+     //                         break
+     
+     //                    default
+     //                         put false into tErrorA["completed"]
+     //                         put "You are calling an API that is not supported by cdb_superBatch:" && tAPI into tErrorA["response"]
+     //                         put "cdb_superBatch" into tErrorA["context"]
+     //                         csi_saveResult tErrorA
+     //                         break
+     //               end switch
+     
+     //               if not cdb_result() then csi_superBatchError
+     //               if pErrorBehavior is "rollBack" then exit cdb_superBatch
+     //          end repeat
+     
+     //          --BUILD PACKAGE
+     //          put "superBatch" into tParametersA["requestType"]
+     //          put gCSIteamDataA[tTeamID][tTableName]["responseFolder"] into tParametersA["responseFolder"]
+     //          put tTeamID into tParametersA["teamID"]
+     //          put tTableName into tParametersA
+     
+     //          --PROCESS CLOUD CALLS
+     //          csi_sendPackageToServer pInputA,tParametersA,pErrorBehavior
+     //     end if
+end cdb_superBatch
+
+
+
+private command _____READ
+end _____READ
+function cdb_readLocal pInputA
+     local tArrayA, tDataA, tErrorA, tTableID
+     
+     --ERROR CHECKING
+     if pInputA["cdbRecordID"] is empty then
+          --SAVE RESULTS
+          put false into tErrorA["completed"]
+          put "No record ids were provided to cdb_readLocal." into tErrorA["response"]
+          put "cdb_readLocal" into tErrorA["context"]
+          csi_saveResult tErrorA
+     end if
+     
+     if pInputA["cdbTableName"] is empty then
+          --SAVE RESULTS
+          put false into tErrorA["completed"]
+          put "No cdbTableName was provided to cdb_readCloud." into tErrorA["response"]
+          put "cdb_readCloud" into tErrorA["context"]
+          csi_saveResult tErrorA
+     end if
+     
+     --MASSAGE THE ARRAY INTO BATCH FORMAT
+     repeat for each line xRecordID in pInputA["cdbRecordID"]
+          put empty into tArrayA[gCSIindexTableIDA[pInputA["cdbTableName"]]][xRecordID]
+     end repeat
+     
+     put cdb_batchReadLocal(tArrayA) into tArrayA
+     
+     --REFORMAT THE RESULTS INTO SOMETHING SIMPLE
+     put the keys of  tArrayA into tTableID
+     
+     repeat for each key xRecordID in tArrayA[tTableID]
+          put tArrayA[tTableID][xRecordID] into tDataA[xRecordID]
+     end repeat
+     
+     //COLLAPSE RESULTS IF POSSIBLE
+     if the num of elements of tDataA = 1 then
+          put tDataA[line 1 of the keys of tDataA] into tDataA
+          put tDataA["cdb"]["cdbRecordID"] into tDataA["cdbRecordID"]
+          put tDataA["cdb"]["cdbTableName"] into tDataA["cdbTableName"]
+          delete variable tDataA["cdb"]
+          delete variable tDataA["csi"]
+     end if
+     
+     return tDataA
+end cdb_readLocal
+
+
+function cdb_readCloud pInputA
+     local tArrayA, tDataA, tErrorA, tTableID
+     
+     //DOCS
+     //API ONLY SUPPORTS A SINGLE TABLE WITH 1 OR MORE RECORD IDS LINE DELIMITED
+     //pInputA MUST CONTAIN THE FOLLOWING KEYS: cdbRecordID, cdbTableName
+     //cdbRecordID MAY CONTAIN 1 TO N LINES OF RECORD IDS
+     //cdbTableName MUST CONTAIN A SINGLE TABLE NAME
+     //RETURNS VALUE IN STANDARD VARIABLE
+     
+     --ERROR CHECKING
+     if pInputA["cdbRecordID"] is empty then
+          --SAVE RESULTS
+          put false into tErrorA["completed"]
+          put "No record ids were provided to cdb_readCloud." into tErrorA["response"]
+          put "cdb_readCloud" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     if pInputA["cdbTableName"] is empty then
+          --SAVE RESULTS
+          put false into tErrorA["completed"]
+          put "No cdbTableName was provided to cdb_readCloud." into tErrorA["response"]
+          put "cdb_readCloud" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     --MASSAGE THE ARRAY INTO BATCH FORMAT
+     repeat for each line xRecordID in pInputA["cdbRecordID"]
+          put empty into tArrayA[gCSIindexTableIDA[pInputA["cdbTableName"]]][xRecordID]
+     end repeat
+     
+     put cdb_batchReadCloud(tArrayA) into tArrayA
+     
+     --REFORMAT THE RESULTS INTO SOMETHING SIMPLE
+     put the keys of tArrayA into tTableID
+     
+     repeat for each key xRecordID in tArrayA[tTableID]
+          put tArrayA[tTableID][xRecordID] into tDataA[xRecordID]
+     end repeat
+     
+     //COLLAPSE RESULTS IF POSSIBLE
+     if the num of elements of tDataA = 1 then
+          put tDataA[line 1 of the keys of tDataA] into tDataA
+          put tDataA["cdb"]["cdbRecordID"] into tDataA["cdbRecordID"]
+          put tDataA["cdb"]["cdbTableName"] into tDataA["cdbTableName"]
+          delete variable tDataA["cdb"]
+          delete variable tDataA["csi"]
+     end if
+     
+     return tDataA
+end cdb_readCloud
+
+
+function cdb_batchReadLocal pInputA
+     local tErrorA, tRecordA, tRecordID, tTableName, tTeamID
+     
+     //DOCUMENTATION//
+     //pInputA IS AN ARRAY WITH THE FOLLOWING STRUCTURE: pInputA[cdbTableID][recordIDs AS ELEMENTS]
+     
+     --CHECK CONTEXT FOR EACH TABLE ID
+     repeat for each key xTableID in pInputA
+          put gCSIindexTableNameA[xTableID] into tTableName
+          if not(csi_checkContext("cdb_batchReadLocal",tTableName,tTeamID)) then return empty //INVALID teamID, TABLENAME, OR BOTH
+     end repeat
+     
+     --CHECK RECORD IDS
+     repeat for each key xTableID in pInputA
+          if the keys of pInputA[xTableID] <> "*" then
+               --VERIFY EACH RECORD ID IN EACH TABLE ID PROVIDED
+               if not(csi_checkRecordID("cdb_batchReadLocal",pInputA[xTableID],true,xTableID,tTeamID)) then return empty //INVALID RECORDID, OR RECORD DOES NOT EXIST
+          end if
+     end repeat
+     
+     --READ LOCAL DATABASE
+     repeat for each key xTableID in pInputA
+          if the keys of pInputA[xTableID] <> "*" then
+               --GET SPECIFIC RECORDS FROM THIS TABLE
+               repeat for each key xRecordID in pInputA[xTableID]
+                    put gCSIdatabaseA[xTableID][char 1 to gCSIconfigA["CassiaDB"]["recordCluster"] of xRecordID] [xRecordID] into tRecordA[xTableID][xRecordID]
+               end repeat
+          else
+               --GET ALL THE RECORDS FROM THIS TABLE
+               repeat for each key xRecordCluster in gCSIdatabaseA[xTableID]
+                    put the keys of gCSIdatabaseA[xTableID][xRecordCluster] into tRecordID
+                    put gCSIdatabaseA[xTableID][xRecordCluster][tRecordID] into tRecordA[xTableID][tRecordID]
+               end repeat
+          end if
+     end repeat
+     
+     put true into tErrorA["completed"]
+     put empty into tErrorA["response"]
+     put "cdb_batchReadLocal" into tErrorA["context"]
+     csi_saveResult tErrorA
+     
+     return tRecordA
+end cdb_batchReadLocal
+
+
+function cdb_batchReadCloud @rInputA
+     local tErrorA, tErrorCheckingMode, tParametersA, tResultA
+     local tServerResponseA, tTableName, tTeamID
+     
+     --ERROR CHECKING MODE
+     if rInputA["errorChecking"] is empty then put true into tErrorCheckingMode else put rInputA["errorChecking"] into tErrorCheckingMode
+     delete var rInputA["errorChecking"]
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_batchReadCloud" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     --VERIFY DEV IS SENDING AN ARRAY
+     if rInputA is not an array then
+          put "Expecting data passed to cdb_batchReadCloud to be an array." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     --CHECK CONTEXT FOR EACH TABLE ID
+     repeat for each key xTableID in rInputA
+          put gCSIindexTableNameA[xTableID] into tTableName
+          if not(csi_checkContext("cdb_batchReadCloud",tTableName,tTeamID)) then return empty //INVALID teamID, TABLENAME, OR BOTH
+     end repeat
+     
+     --CHECK RECORD IDS
+     if tErrorCheckingMode then
+          repeat for each key xTableID in rInputA
+               if the keys of rInputA[xTableID] <> "*" then
+                    --VERIFY EACH RECORD ID IN EACH TABLE ID PROVIDED
+                    if not(csi_checkRecordID("cdb_batchReadCloud",rInputA[xTableID],false,xTableID,tTeamID)) then return empty //INVALID RECORDID, OR RECORD DOES NOT EXIST
+               end if
+          end repeat
+     end if
+     
+     --BUILD PACKAGE
+     put "readCloud" into tParametersA["requestType"]
+     put gCSIteamDataA[tTeamID][tTableName]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put tTeamID into tParametersA["teamID"]
+     put tTableName into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer rInputA,tParametersA,"ignore"
+     put the result into tResultA
+     
+     --SAVE RESULTS
+     if tResultA["uploadStatus"] then
+          --DOWNLOAD THE RESULTS FROM THE SERVER
+          put csi_downloadServerResponse(tResultA["fileName"],tTableName,tTeamID) into tServerResponseA
+          if not cdb_Result() then
+               put "There was a problem getting a response from the server for cdb_batchReadCloud request." into tErrorA["response"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+          
+          put true into tErrorA["completed"]
+          csi_saveResult tErrorA
+          return tServerResponseA["response"]
+     else
+          --THE UPLOAD FAILED, RETURN ERROR
+          put false into tErrorA["completed"]
+          put "Error reading cloud records." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+end cdb_batchReadCloud
+
+
+
+private command _____UPDATE
+end _____UPDATE
+command cdb_updateLocal pInputA
+     local tArrayA
+     
+     repeat for each key xKey in pInputA
+          put pInputA[xKey] into tArrayA[gCSIindexTableIDA[pInputA["cdbTableName"]]][1][xKey]
+     end repeat
+     delete var tArrayA[gCSIindexTableIDA[pInputA["cdbTableName"]]][1]["cdbTableName"]
+     
+     cdb_batchUpdateLocal tArrayA
+end cdb_updateLocal
+
+
+command cdb_updateCloud pInputA
+     local tArrayA
+     
+     repeat for each key xKey in pInputA
+          put pInputA[xKey] into tArrayA[gCSIindexTableIDA[pInputA["cdbTableName"]]][1][xKey]
+     end repeat
+     
+     delete var tArrayA[gCSIindexTableIDA[pInputA["cdbTableName"]]][1]["cdbTableName"]
+     
+     cdb_batchUpdateCloud tArrayA
+end cdb_updateCloud
+
+
+command cdb_batchUpdateLocal pInputA
+   local tErrorA, tRecordClusterA, tReturnDataA, tTableName
+   local tTeamID
+   
+   --SET UP DEFAULT ERROR CHECKING
+   put "cdb_batchUpdateLocal" into tErrorA["context"]
+   put false into tErrorA["completed"]
+   
+   --VERIFY DEV IS SENDING AN ARRAY
+   if pInputA is not an array then
+      put "pInputA is not an array." into tErrorA["response"]
+      csi_saveResult tErrorA
+      return empty
+   end if
+   
+   --CHECK CONTEXT FOR EACH TABLE ID
+   repeat for each key xTableID in pInputA
+      put gCSIindexTableNameA[xTableID] into tTableName
+      if not(csi_checkContext("cdb_batchUpdateLocal",tTableName,tTeamID)) then return empty //INVALID teamID, TABLENAME, OR BOTH
+   end repeat
+   
+   --VERIFY RECORD IDS IF PASSED IN ARRAY
+   --GENEREATE RECORD IDS IF NEEDED
+   --ADD TIMING VALUES TO EACH RECORD
+   --TABLE NAME
+   repeat for each key xTableID in pInputA
+      repeat for each key xIndexKey in pInputA[xTableID]
+         
+         --PLACE CURRENT cdb and csi VALUES FROM DATABASE INTO pInputA
+         --TO PREVENT DEV FROM TRYING TO INJECT DATA IN THERE
+         --BYPASSING THE SCHEMA CHECK
+         delete var pInputA[xTableID][xIndexKey]["csi"]
+         delete var pInputA[xTableID][xIndexKey]["cdb"]
+         
+         --CHECK THE PASSED RECORD ID IF IT IS PASSED IN DEV ARRAY
+         --               if not(csi_checkRecordID("cdb_batchUpdateLocal",pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"],true,xTableID,tTeamID)) then
+         --                    return empty //INVALID RECORD ID, OR RECORD DOES NOT EXIST
+         --               end if
+         
+         put gCSIdatabaseA[xTableID][char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of (pInputA[xTableID][xIndexKey]["cdbRecordID"])] [pInputA[xTableID][xIndexKey]["cdbRecordID"]] ["cdb"] \
+               into pInputA[xTableID][xIndexKey]["cdb"]
+         
+         put gCSIdatabaseA[xTableID][char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of (pInputA[xTableID][xIndexKey]["cdbRecordID"])] [pInputA[xTableID][xIndexKey]["cdbRecordID"]] ["csi"] \
+               into pInputA[xTableID][xIndexKey]["csi"]
+         
+         --MOVE cdbRecordID TO IS NATURAL PLACE
+         put pInputA[xTableID][xIndexKey]["cdbRecordID"] into pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"]
+         
+         --UPDATE cdbTIMING VALUES
+         put the seconds into pInputA[xTableID][xIndexKey]["cdb"]["cdbDateModified"]
+         
+         --ADD RECORD VERSION
+         add 1 to pInputA[xTableID][xIndexKey]["csi"]["recordVersion"]
+      end repeat
+      
+      --VALIDATE THE KEYS AGAINST THE SCHEMA
+      --csi_checkAgainstSchema: pExecutionContext, pInputA, pSchema
+      --GET SCHEMA: pForm, pTableName, pTeamID
+      if not(csi_checkAgainstSchema("cdb_batchUpdateLocal",pInputA,\
+      csi_getSchema("advanced",gCSIindexTableNameA[xTableID],gCSIindexTeamIDA[xTableID]))) then return empty
+   end repeat
+   
+   --SAVE CHANGES BACK TO LOCAL DATABASE ARRAY
+   repeat for each key xTableID in pInputA
+      repeat for each key xIndexKey in pInputA[xTableID]
+         
+         --ATOMIZED SAVE SUPPORT
+         repeat for each key xKey in pInputA[xTableID][xIndexKey]
+            --UPDATE gCSIdatabaseA ARRAY
+            put pInputA[xTableID][xIndexKey][xKey] into gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of (pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"])] [pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"]][xKey]
+         end repeat
+         
+         --BUILD A LIST OF RECORD CLUSTERS TO BE PASSED TO csi_saveRAMToDisk
+         put empty into tRecordClusterA[char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of (pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"])]
+         
+         --BUILD A LIST OF RECORD IDS AND RELATIVE TABLE IDS
+         --WILL BE RETURNED TO DEV AT THE END OF THIS API
+         put empty into tReturnDataA[xTableID][pInputA[xTableID][xIndexKey]["cdb"]["cdbRecordID"]]
+      end repeat
+      
+      --SAVE FILE LOCALLY
+      csi_saveRAMToDisk tRecordClusterA,xTableID
+      delete var tRecordClusterA
+   end repeat
+   
+   --SAVE RESULTS
+   if not cdb_result() then
+      put false into tErrorA["completed"]
+      put "Could not write record to disk." into tErrorA["response"]
+      csi_saveResult tErrorA
+      return empty
+   else
+      put true into tErrorA["completed"]
+      put empty into tErrorA["response"]
+      csi_saveResult tErrorA
+   end if
+end cdb_batchUpdateLocal
+
+
+command cdb_batchUpdateCloud pInputA
+     local tErrorA, tParametersA, tRecordIDA, tResultA, tTableName
+     local tTeamID
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_batchUpdateCloud" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     --VERIFY DEV IS SENDING AN ARRAY
+     if pInputA is not an array then
+          put "pInputA is not an array." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     
+     --CHECK CONTEXT FOR EACH TABLE ID
+     repeat for each key xTableID in pInputA
+          put gCSIindexTableNameA[xTableID] into tTableName
+          if not(csi_checkContext("cdb_batchUpdateCloud",tTableName,tTeamID)) then return empty //INVALID teamID, TABLENAME, OR BOTH
+     end repeat
+     
+     --VERIFY RECORD IDS IF PASSED IN ARRAY
+     --GENEREATE RECORD IDS IF NEEDED
+     --ADD TIMING VALUES TO EACH RECORD
+     --TABLE NAME
+     repeat for each key xTableID in pInputA
+          repeat for each key xIndexKey in pInputA[xTableID]               
+               --CHECK THE PASSED RECORD ID IF IT IS PASSED IN DEV ARRAY
+               if not(csi_checkRecordID("cdb_batchUpdateCloud",pInputA[xTableID][xIndexKey]["cdbRecordID"],false,xTableID,tTeamID)) then
+                    return empty //INVALID RECORD ID, OR RECORD DOES NOT EXIST
+               end if
+               
+               --REMEMBER cdbRecordIDs TO REPORT BACK TO DEV
+               put empty into tRecordIDA[pInputA[xTableID][xIndexKey]["cdbRecordID"]]
+          end repeat
+          
+          --VALIDATE THE KEYS AGAINST THE SCHEMA
+          --csi_checkAgainstSchema: pExecutionContext, pInputA, pSchema
+          --GET SCHEMA: pForm, pTableName, pTeamID
+          if not(csi_checkAgainstSchema("cdb_batchUpdateCloud",pInputA,\
+          csi_getSchema("advanced",gCSIindexTableNameA[xTableID],gCSIindexTeamIDA[xTableID]))) then return empty
+     end repeat
+     
+     --UPDATE HYPER-BLOBS
+     repeat for each key xTableID in pInputA
+          repeat for each key xIndexKey in pInputA[xTableID]
+               if offset(":hyperblob",the keys of pInputA[xTableID][xIndexKey]) > 0 then
+                    csi_manageHyperBlob pInputA[xTableID][xIndexKey],"update",gCSIindexTablenameA[xTableID],gCSIindexTeamIDA[xTableID]
+                    if not cdb_result() then
+                         put "One or more HyperBlobs could not be created; Your records have been created without HyperBlobs." into tErrorA["response"]
+                         csi_saveResult tErrorA
+                         return empty
+                    end if
+               end if
+          end repeat
+     end repeat
+     
+     --BUILD PACKAGE
+     put "updateCloud" into tParametersA["requestType"]
+     put gCSIteamDataA[tTeamID][tTableName]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put tTeamID into tParametersA["teamID"]
+     put tTableName into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer pInputA,tParametersA,"ignore"
+     put the result into tResultA
+     
+     --SAVE RESULTS
+     if not cdb_result() then
+          put "Could not write record to cloud." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     else
+          put true into tErrorA["completed"]
+          put empty into tErrorA["response"]
+          csi_saveResult tErrorA
+     end if
+end cdb_batchUpdateCloud
+
+
+
+private command _____MERGE
+end _____MERGE
+command cdb_batchMergeLocal pInputA
+     local tCurrentValue, tDelimiter, tErrorA, tFoundItem, tNewValue
+     local tRecordClustersA, tSearchValue, tTableName, tTeamID
+     
+     --ARRAY FORMAT
+     --pInputA[cdbTeamID][cdbTableName][pRecordID][pKey][pValue]
+     --                                                  [pOperator]
+     --                                                  [pDelimeter]
+     
+     
+     --VERIFY tableID, tableName, AND SCHEMA
+     put empty into tTeamID
+     repeat for each key xTableID in pInputA
+          put cdb_getTeamID(xTableID) into tTeamID
+          put gCSIindexTableNameA[xTableID] into tTableName
+          if not(csi_checkContext("cdb_batchMergeLocal",tTableName,tTeamID)) then return empty
+          repeat for each key xRecordID in pInputA[xTableID]
+               if not(csi_checkRecordID("cdb_batchMergeLocal",xRecordID,true,tTableName,tTeamID)) then \
+                     return empty
+               
+               --VALIDATE THE KEYS AGAINST THE SCHEMA
+               --csi_checkAgainstSchema: pExecutionContext, pInputA, pSchema
+               --GET SCHEMA: pForm, pTableName, pTeamID
+               repeat for each key xKey in pInputA[xTableID]
+                    --VALIDATE THE KEYS AGAINST THE SCHEMA
+                    if not(csi_checkAgainstSchema("cdb_batchMergeLocal",pInputA,\
+                    csi_getSchema("advanced",tTableName,tTeamID))) then return empty
+               end repeat
+          end repeat
+     end repeat
+     
+     --MERGE DATA INTO DATABASE
+     repeat for each key xTableID in pInputA
+          repeat for each key xRecordID in pInputA[xTableID]
+               repeat for each key xKey in pInputA[xTableID][xRecordID]
+                    
+                    --MERGE IF NEEDED
+                    set the itemDel to "|"
+                    
+                    --CURRENT VALUE
+                    put gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID][xKey] into tCurrentValue
+                    
+                    --NEW VALUE
+                    put pInputA[xTableID][xRecordID][xKey]["value"] into tNewValue
+                    
+                    --delimiter
+                    put pInputA[xTableID][xRecordID][xKey]["delimiter"] into tDelimiter
+                    if tDelimiter is empty then put comma into tDelimiter
+                    if tDelimiter is a number then put numToChar(tDelimiter) into tDelimiter
+                    set the itemDel to tDelimiter
+                    
+                    switch pInputA[xTableID][xRecordID][xKey]["operator"]
+                         case "is"
+                              if tNewValue <> tCurrentValue then
+                                   --REPLACE ITEM IN DATABASE ARRAY
+                                   set the itemDel to "|"
+                                   put tNewValue into gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID][xKey]
+                                   put the seconds into gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID]["cdb"]["cdbDateModified"]
+                                   add 1 to gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID]["csi"]["recordVersion"]
+                              end if
+                              break
+                              
+                         case "is not"
+                              if tNewValue = tCurrentValue then
+                                   --REMOVE ITEM FROM DATABASE ARRAY
+                                   set the itemDel to "|"
+                                   put empty into gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID][xKey]
+                                   put the seconds into gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID]["cdb"]["cdbDateModified"]
+                                   add 1 to gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID]["csi"]["recordVersion"]
+                              end if
+                              break
+                              
+                         case "is not in"
+                              repeat for each item xItem in tNewValue
+                                   if xItem is among the items of tCurrentValue then
+                                        --FIND JUST THE ITEM AND REMOVE IT...LEAVING OTHER DATA THERE
+                                        put itemOffset(xItem,tCurrentValue) into tFoundItem
+                                        
+                                        --REMOVE ITEM
+                                        put empty into item tFoundItem of tCurrentValue
+                                        
+                                        --REMOVE REMAINING delimiter
+                                        if tFoundItem > 1 then
+                                             --WE HAVE MULTIPLE ITEMS AND NEED TO FIND LEFT OVER delimiter
+                                             put item (tFoundItem - 1) of tCurrentValue into tSearchValue
+                                             put offset(tSearchValue,tCurrentValue) into tFoundItem
+                                             add the num of chars of tSearchValue to tFoundItem
+                                             delete char tFoundItem of tCurrentValue
+                                        else
+                                             --THERE IS ONLY ONE delimiter TO CLEAN
+                                             delete char 1 of tCurrentValue
+                                        end if
+                                   end if
+                              end repeat
+                              
+                              --MERGE BACK INTO DATABASE ARRAY
+                              set the itemDel to "|"
+                              put tCurrentValue into gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID][xKey]
+                              put the seconds into gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID]["cdb"]["cdbDateModified"]
+                              add 1 to gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID]["csi"]["recordVersion"]
+                              break
+                              
+                         default --"is in"
+                              repeat for each item xItem in tNewValue
+                                   if xItem is not among the items of tCurrentValue then
+                                        --ADD ITEM IF NOT THERE AFTER EXISTING DATA
+                                        if tCurrentValue is not empty then put tDelimiter after tCurrentValue
+                                        put xItem after tCurrentValue
+                                   end if
+                              end repeat
+                              
+                              --MERGE BACK INTO DATABASE ARRAY
+                              set the itemDel to "|"
+                              put tCurrentValue into gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID][xKey]
+                              put the seconds into gCSIdatabaseA[xTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID]["cdb"]["cdbDateModified"]
+                              add 1 to gCSIdatabaseA[xTableID][char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID]["csi"]["recordVersion"]
+                              break
+                    end switch
+                    
+                    --SAVE FILE LOCALLY
+                    put empty into tRecordClustersA[char 1 to gCSIconfigA["CassiaDB"]["recordCluster"] of xRecordID]
+                    csi_saveRAMToDisk tRecordClustersA,xTableID
+               end repeat
+          end repeat
+     end repeat
+     
+     put true into tErrorA["completed"]
+     put "cdb_updateLocal" into tErrorA["context"]
+     csi_saveResult tErrorA
+end cdb_batchMergeLocal
+
+
+command cdb_batchMergeCloud pInputA
+     local tErrorA, tParametersA, tResultA, tTableName, tTeamID
+     
+     --ARRAY FORMAT
+     --pInputA[cdbTeamID][cdbTableName][pRecordID][pKey][pValue]
+     --                                                  [pOperator]
+     --                                                  [pDelimeter]
+     
+     
+     --VERIFY tableID, tableName, AND SCHEMA
+     put empty into tTeamID
+     repeat for each key xTableID in pInputA
+          put cdb_getTeamID(xTableID) into tTeamID
+          put gCSIindexTableNameA[xTableID] into tTableName
+          if not(csi_checkContext("cdb_batchMergeCloud",tTableName,tTeamID)) then return empty
+          
+          repeat for each key xRecordID in pInputA[xTableID]
+               if not(csi_checkRecordID("cdb_batchMergeCloud",xRecordID,true,tTableName,tTeamID)) then \
+                     return empty
+               
+               //INVALID RECORDID, OR RECORDID DOES NOT EXIST
+               repeat for each key xKey in pInputA[xTableID][xRecordID]
+                    --VALIDATE THE KEYS AGAINST THE SCHEMA
+                    if not(csi_checkAgainstSchema("cdb_batchMergeLocal",pInputA,\
+                    csi_GetSchema("advanced",tTableName,tTeamID))) then return empty
+               end repeat
+          end repeat
+     end repeat
+     
+     --BUILD PACKAGE
+     put "mergeCloud" into tParametersA["requestType"]
+     put gCSIteamDataA[tTeamID][tTableName]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put tTeamID into tParametersA["teamID"]
+     put tTableName into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer pInputA,tParametersA,"ignore"
+     put the result into tResultA
+     
+     --SAVE RESULTS
+     if tResultA["uploadStatus"] then
+          put true into tErrorA["completed"]
+          csi_saveResult tErrorA
+     else
+          --THE UPLOAD FAILED, RETURN ERROR
+          put false into tErrorA["completed"]
+          put "Error creating cloud record." into tErrorA["response"]
+          csi_saveResult tErrorA
+     end if
+end cdb_batchMergeCloud
+
+
+
+private command _____DELETE
+end _____DELETE
+command cdb_deleteLocal pInputA
+     local tArrayA
+     
+     --MASSAGE THE ARRAY INTO BATCH FORMAT
+     repeat for each line xRecordID in pInputA["cdbRecordID"]
+          put empty into tArrayA[gCSIindexTableIDA[pInputA["cdbTableName"]]][xRecordID]
+     end repeat
+     
+     cdb_batchDeleteLocal tArrayA
+end cdb_deleteLocal
+
+
+command cdb_deleteCloud pInputA
+     local tArrayA
+     
+     --MASSAGE THE ARRAY INTO BATCH FORMAT
+     repeat for each line xRecordID in pInputA["cdbRecordID"]
+          put empty into tArrayA[gCSIindexTableIDA[pInputA["cdbTableName"]]][xRecordID]
+     end repeat
+     
+     cdb_batchDeleteCloud tArrayA
+end cdb_deleteCloud
+
+
+command cdb_batchDeleteLocal pInputA
+     local tErrorA, tRecordClustersA, tTableName, tTeamID
+     
+     //DOCUMENTATION//
+     //pInputA IS AN ARRAY WITH THE FOLLOWING STRUCTURE: pInputA[cdbTableID][recordIDs AS ELEMENTS]
+     
+     --CHECK CONTEXT FOR EACH TABLE ID
+     repeat for each key xTableID in pInputA
+          put gCSIindexTableNameA[xTableID] into tTableName
+          if not(csi_checkContext("cdb_batchDeleteLocal",tTableName,tTeamID)) then return empty //INVALID teamID, TABLENAME, OR BOTH
+     end repeat
+     
+     --CHECK RECORD IDS ONLY IF THE DEV IS DELETING SPECIFIC RECORD IDS
+     repeat for each key xTableID in pInputA
+          if the keys of pInputA[xTableID] <> "*" then
+               --VERIFY EACH RECORD ID IN EACH TABLE ID PROVIDED
+               if not(csi_checkRecordID("cdb_batchDeleteLocal",pInputA[xTableID],true,xTableID,tTeamID)) then return empty //INVALID RECORDID, OR RECORD DOES NOT EXIST
+          end if
+     end repeat
+     
+     --INDEX THE RECORD CHUNKS THAT ARE TO BE UPDATED IN DISK CACHE
+     repeat for each key xTableID in pInputA
+          --REMOVE RECORDS FROM MEM DATABASE
+          --WE NEED ALL THE RECORD IDS LINE DELIMITED FOR THIS NEXT STEP
+          csi_deleteRecordsFromRAM pInputA[xTableID],tTableName,tTeamID
+          
+          --DELETE INDIVIDUAL RECORDS
+          if the keys of pInputA[xTableID] <> "*" then
+               repeat for each key xRecordID in pInputA[xTableID]
+                    put empty into tRecordClustersA[char 1 to gCSIconfigA["CassiaDB"]["recordCluster"] of xRecordID]
+               end repeat
+          else
+               put "*" into tRecordClustersA
+          end if
+          
+          --UPDATE LOCAL DISK CACHE
+          csi_saveRAMToDisk tRecordClustersA,xTableID
+          
+          put cdb_Result("array") into tErrorA
+          if not tErrorA["completed"] then
+               put "cdb_batchDeleteLocal" into tErrorA["context"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+     end repeat
+     
+     put empty into tErrorA
+     put true into tErrorA["completed"]
+     put "cdb_batchDeleteLocal" into tErrorA["context"]
+     csi_saveResult tErrorA
+end cdb_batchDeleteLocal
+
+
+command cdb_batchDeleteCloud pInputA
+     local tErrorA, tParametersA, tResultA, tTableName, tTeamID, tHyperBlobID, tInputA, tSchema, tFoundLine
+     
+     //DOCUMENTATION//
+     //pInputA IS AN ARRAY WITH THE FOLLOWING STRUCTURE: pInputA[cdbTableID][recordIDs AS ELEMENTS]
+     
+     --CHECK CONTEXT FOR EACH TABLE ID
+     repeat for each key xTableID in pInputA
+          put gCSIindexTableNameA[xTableID] into tTableName
+          if not(csi_checkContext("cdb_batchDeleteCloud",tTableName,tTeamID)) then return empty //INVALID teamID, TABLENAME, OR BOTH
+     end repeat
+     
+     --CHECK RECORD IDS ONLY IF THE DEV IS DELETING SPECIFIC RECORD IDS
+     repeat for each key xTableID in pInputA
+          if the keys of pInputA[xTableID] <> "*" then
+               --VERIFY EACH RECORD ID IN EACH TABLE ID PROVIDED
+               if not(csi_checkRecordID("cdb_batchDeleteCloud",pInputA[xTableID],false,xTableID,tTeamID)) then return empty //INVALID RECORDID, OR RECORD DOES NOT EXIST
+          end if
+     end repeat
+     
+     --DELETE HYPER-BLOBS
+     repeat for each key xTableID in pInputA
+          repeat for each key xRecordID in pInputA[xTableID]
+               put gCSIindexTableNameA[xTableID] into tInputA["cdbTableName"]
+               put cdb_getSchema(tInputA) into tSchema
+               
+               repeat for each line xKey in tSchema
+                    --FIGURE OUT IF WE HAVE HYPERBLOBS TO DELETE
+                    if ":hyperblob" is not in tSchema then exit repeat
+                    if ":hyperblob" is not in xKey then next repeat
+                    
+                    put gCSIindexTeamIDA[xTableID] into tInputA["cdbTeamID"]
+                    put gCSIindexTableNameA[xTableID] into tInputA["cdbTableName"]
+                    put xKey into tInputA["key"]
+                    put xRecordID into tInputA["cdbRecordID"]
+                    put cdb_lookupCloudValue(tInputA) into tHyperBlobID
+                    
+                    csi_deleteHyperBlob tHyperBlobID,tInputA["cdbTableName"],tInputA["cdbTeamID"]
+                    if not cdb_result() then
+                         put false into tErrorA["completed"]
+                         put "One or more HyperBlobs could not be deleted; no records have been modified." into tErrorA["response"]
+                         put "cdb_batchDeleteCloud" into tErrorA["context"]
+                         csi_saveResult tErrorA
+                         exit cdb_batchDeleteCloud
+                    end if
+               end repeat
+          end repeat
+     end repeat
+     
+     --BUILD PACKAGE
+     put "deleteCloud" into tParametersA["requestType"]
+     put gCSIteamDataA[tTeamID][tTableName]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put tTeamID into tParametersA["teamID"]
+     put tTableName into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer pInputA,tParametersA,"ignore"
+     put the result into tResultA
+     
+     --SAVE RESULTS
+     if not cdb_result() then
+          put false into tErrorA["completed"]
+          put "Could not delete record from cloud." into tErrorA["response"]
+          put "cdb_batchDeleteCloud" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     else
+          put true into tErrorA["completed"]
+          put empty into tErrorA["response"]
+          put "cdb_batchDeleteCloud" into tErrorA["context"]
+          csi_saveResult tErrorA
+     end if
+end cdb_batchDeleteCloud
+
+
+
+private command _____DATABASE_AND_TABLES
+end _____DATABASE_AND_TABLES
+command cdb_loadTable pInputA
+     if pInputA["callback"]["control"] is empty then put item 1 of the executionContexts into pInputA["callback"]["control"]
+     
+     csi_loadTable pInputA
+end cdb_loadTable
+
+
+command cdb_unloadTable pInputA
+     csi_unloadTable pInputA
+end cdb_unloadTable
+
+
+function cdb_getTableID pTableName
+     local tErrorA, tTableID
+     
+     //DOCUMENTATION
+     //TAKES tableName AS A PARAMETER
+     //RETURNS VALUE IN STANDARD VARIABLE
+     
+     --SET UP ERROR CHECKING
+     put false into tErrorA["completed"]
+     put "Could not determine the teamID based on the parameter provided:" && pTableName into tErrorA["response"]
+     put "cdb_getTeamID" into tErrorA["context"]
+     
+     put gCSIindexTableIDA[pTableName] into tTableID
+     if tTableID is not empty then
+          put true into tErrorA["completed"]
+          put empty into tErrorA["response"]
+          csi_saveResult tErrorA
+          return tTableID
+     else
+          csi_saveResult tErrorA
+          return empty
+     end if
+end cdb_getTableID
+
+
+function cdb_getTableKeys pInputA
+     local tErrorA
+     
+     //DOCUMENTATION
+     //EXPECTING AN ARRAY
+     //REQUIRED KEYS: cdbTableName
+     
+     --VERIFY TABLE EXISTS
+     if pInputA["cdbTableName"] is not among the keys of gCSIindexTableIDA then
+          put false into tErrorA["completed"]
+          put "tableName" && "'" & pInputA["cdbTableName"] & "'" && "does not exist." into tErrorA["response"]
+          put "cdb_createKeys" into tErrorA["context"]
+          csi_saveResult tErrorA
+          exit cdb_getTableKeys
+     end if
+     
+     --RETURNS A COMMA DELIMITED VALUE
+     return gCSIconfigA["Client"][cdb_getTeamID()][pInputA["cdbTableName"]]["devKeys"]
+end cdb_getTableKeys
+
+
+function cdb_getTableNames pInputA
+     local tResultA, tTableNames
+     
+     //DOCUMENTATION
+     //EXPECTING AN ARRAY
+     //OPTIONAL KEYS: cdbTeamID
+     
+     put false into tResultA["completed"]
+     put "cdb_getTableNames" into tResultA["context"]
+     
+     if pInputA["cdbTeamID"] is empty then put cdb_getTeamID() into pInputA["cdbTeamID"] //HAVE TO CHECK THIS WAY, OR WE'LL GO INTO AN INFINITE LOOP
+     
+     switch
+          case pInputA["cdbTeamID"] is empty
+               put "No teamID was specified in the parameters." into tResultA["response"]
+               csi_saveResult tResultA
+               return empty
+               break
+               
+          case not(csi_IsValidTeamID(pInputA["cdbTeamID"]))
+               put "The specified teamID does not exist:" && pInputA["cdbTeamID"] into tResultA["response"]
+               csi_saveResult tResultA
+               return empty
+               break
+     end switch
+     
+     --SAVE RESULTS
+     put true into tResultA["completed"]
+     put empty into tResultA["response"]
+     put "cdb_getTableNames" into tResultA["context"]
+     csi_saveResult tResultA
+     
+     put the keys of gCSIteamDataA[pInputA["cdbTeamID"]] into tTableNames
+     sort tTableNames ascending
+     return tTableNames
+end cdb_getTableNames
+
+
+function cdb_getSchema pInputA
+     local tErrorA
+     
+     if not(csi_checkContext("cdb_getSchema",pInputA["cdbTableName"],pInputA["cdbTeamID"])) then return empty
+     
+     --SAVE RESULTS
+     put true into tErrorA["completed"]
+     put empty into tErrorA["response"]
+     put "cdb_getSchema" into tErrorA["context"]
+     csi_saveResult tErrorA
+     
+     return csi_getSchema(pInputA["format"],pInputA["cdbTableName"],pInputA["cdbTeamID"])
+end cdb_getSchema
+
+
+command cdb_deleteTable pInputA
+     if not(csi_checkContext("cdb_deleteTable",pInputA["cdbTableName"],pInputA["cdbTeamID"])) then return empty
+     
+     csi_deleteTable pInputA
+end cdb_deleteTable
+
+
+command cdb_exportDatabase pInputA
+     if not(csi_checkContext("cdb_exportDatabase",pInputA["cdbTableName"],pInputA["cdbTeamID"])) then return empty
+     csi_exportDatabase pInputA
+end cdb_exportDatabase
+
+
+function cdb_getTeamIDs
+     //DOCUMENTATION
+     //NO PARAMETERS ARE ACCEPTED
+     //RETURNS A LINE DELIMITED LIST OF TEAM IDS
+     
+     return the keys of gCSIteamDataA
+end cdb_getTeamIDs
+
+
+function cdb_getTeamID pInputA
+     local tResultA, tTeamID
+     
+     //DOCS
+     //OPTIONAL KEYS: cdbTableName, cdbTableID
+     //RETURNS VALUE IN STANDARD VARIABLE
+     
+     put true into tResultA["completed"]
+     put empty into tResultA["response"]
+     put "cdb_getTeamID" into tResultA["context"]
+     
+     switch
+          case gCSIindexTeamIDA[pInputA] is not empty
+               --DEV PROVIDED tableID
+               csi_saveResult tResultA
+               return gCSIindexTeamIDA[pInputA]
+               break
+               
+          case gCSIindexTableIDA[pInputA] is not empty
+               --DEV PROVIDED tableName
+               csi_saveResult tResultA
+               return gCSIindexTeamIDA[gCSIindexTableIDA[pInputA]]
+               break
+               
+          case the num of elements of gCSIteamDataA = 1
+               --NO PARAMETER PROVIDED
+               --TRY TO PROVIDE teamID BY CHECKING gCSIteamDataA
+               csi_saveResult tResultA
+               return line 1 of the keys of gCSIteamDataA
+               break
+               
+          case the num of elements of gCSIteamDataA > 1
+               --IF DEV HAS ACCESS TO MORE THAN ONE cdbTeamID IT MIGHT GIVE THE WRONG TEAM ID
+               --SO ERROR OUT
+               put false into tResultA["completed"]
+               put "More than one cdbTeamID exists. I can not tell which one applies to this situation." into tResultA["response"]
+               csi_saveResult tResultA
+               return empty
+               break
+               
+          default
+               --NO teamID COULD BE FOUND
+               --TRY REBUILDING gCSIteamDataA FOR DEV
+               if not sAttemptedToCorrectFlag then
+                    csi_buildTeamDataA
+                    put true into sAttemptedToCorrectFlag
+                    get cdb_getTeamID()
+               else
+                    put empty into sAttemptedToCorrectFlag
+                    put false into tResultA["completed"]
+                    put "No teamID could be found. gCSIteamDataA variable is missing." into tResultA["response"]
+                    csi_saveResult tResultA
+                    return empty
+               end if
+               break
+     end switch
+end cdb_getTeamID
+
+
+
+private command _____PING
+end _____PING
+function cdb_ping pInputA
+     local tClientCurrentTime, tClientTime, tDatabaseList, tErrorA
+     local tParametersA, tRecordA, tResultA, tServerResponseA
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_ping" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     if pInputA["cdbTableName"] is empty then
+          put cdb_getTableNames() into tDatabaseList
+          put line 1 of tDatabaseList into pInputA["cdbTableName"]
+     end if
+     
+     if not(csi_checkContext("cdb_ping",pInputA["cdbTableName"],pInputA["cdbTeamID"])) then return empty
+     
+     --CURRENT TIME
+     put csi_longSeconds() into tClientTime
+     
+     --BUILD PACKAGE
+     put "ping" into tParametersA["requestType"]
+     put gCSIteamDataA[pInputA["cdbTeamID"]][pInputA["cdbTableName"]]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put pInputA["cdbTeamID"] into tParametersA["teamID"]
+     put pInputA["cdbTableName"] into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer tRecordA,tParametersA,"ignore"
+     put the result into tResultA
+     
+     if tResultA["uploadStatus"] then
+          --DOWNLOAD THE RESULTS FROM THE SERVER
+          put csi_downloadServerResponse(tResultA["fileName"],pInputA["cdbTableName"],pInputA["cdbTeamID"]) into tServerResponseA
+          if not cdb_Result() then
+               put "There was a problem getting a response from the server for ping request." into tErrorA["response"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+          
+          put csi_longSeconds() into tClientCurrentTime
+          put abs(tClientCurrentTime - tClientTime) into tServerResponseA["roundTripTime"]
+          
+          put true into tErrorA["completed"]
+          csi_saveResult tErrorA
+          return tServerResponseA["roundTripTime"]*1000
+     else
+          --THE UPLOAD FAILED, RETURN ERROR
+          put false into tErrorA["completed"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+end cdb_ping
+
+
+
+private command _____SYNC
+end _____SYNC
+command cdb_sync pInputA
+     local tErrorA, tLocalIndexA, tMatchedRecordIDsOnClient, tParametersA
+     local tRecordsA, tResultA, tServerIndexA, tTeamID, tToDeleteListA
+     local tToDownloadListA
+     
+     --DEV WANTS TO PROCESS LOCALLY
+     --REQUEST INDEX FROM CLOUD
+     --DIFF LOCAL VS CLOUD INDEX
+     --PROCESS RECORDS LOCALLY
+     
+     --DEV WANTS TO PROCESS ON THE CLOUD
+     --SEND LOCAL INDEX TO CLOUD
+     --PROCESS RECORDS BASED ON CLOUD-SIDE DIFF
+     
+     if pInputA is not an array then
+          --SAVE RESULTS
+          put false into tErrorA["completed"]
+          put "Execting an array to be passed in call." into tErrorA["response"]
+          put "cdb_sync" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     --GET teamID
+     put cdb_getTeamID(line 1 of pInputA["cdbTableName"]) into tTeamID
+     
+     --INDEX LOCAL RECORDS
+     put csi_buildSyncIndex(pInputA["cdbTableName"]) into tLocalIndexA
+     
+     --REQUEST INDEX FROM SERVER
+     --BUILD PACKAGE
+     put "cloudSyncIndex" into tParametersA["requestType"]
+     put gCSIteamDataA[tTeamID][pInputA["cdbTableName"]]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put tTeamID into tParametersA["teamID"]
+     put pInputA["cdbTableName"] into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer pInputA,tParametersA,"ignore"
+     put the result into tResultA
+     if tResultA["uploadStatus"] then
+          --DOWNLOAD THE RESULTS FROM THE SERVER
+          put csi_downloadServerResponse(tResultA["fileName"],pInputA["cdbTableName"],tTeamID) into tServerIndexA
+          
+          if cdb_result() then
+               delete var tServerIndexA["EOF"]
+               put true into tErrorA["completed"]
+               csi_saveResult tErrorA
+          else
+               --THE UPLOAD FAILED, RETURN ERROR
+               put false into tErrorA["completed"]
+               put "There was a problem getting a response from the server for sync request." into tErrorA["response"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+     end if
+     
+     --CLONE tLocalIndexA to tMatchedRecordIDsOnClient
+     --INTERSECT COMMAND IS DESTRUCTIVE AND WE ARE GOING TO NEED THE ORIGINAL CONTENTS OF tLocalIndexA
+     put tLocalIndexA into tMatchedRecordIDsOnClient
+     
+     --recordIDs THAT ARE LEFT IN tMatchedRecordIDsOnClient ARE ON BOTH THE CLIENT AND THE CLOUD
+     --recordIDs THAT ARE NOT IN tServerIndexA ARE REMOVED FROM tMatchedRecordIDsOnClient
+     intersect tMatchedRecordIDsOnClient with tServerIndexA
+     
+     --DETERMINE WHO WAS REMOVED FROM tMatchedRecordIDsOnClient BECAUSE THESE ARE THE ONES THAT NEED TO BE DELETED ON CLIENT
+     repeat for each key xRecordID in tLocalIndexA
+          if xRecordID is not among the keys of tMatchedRecordIDsOnClient then
+               put empty into tToDeleteListA[cdb_getTableID(pInputA["cdbTableName"])][xRecordID]
+          end if
+     end repeat
+     
+     --DELETE LOCAL RECORDS
+     cdb_batchDeleteLocal tToDeleteListA
+     
+     --FIGURE OUT WHICH RECORDS NEED TO BE DOWNLOADED
+     repeat for each key xRecordID in tLocalIndexA
+          if xRecordID is among the keys of tServerIndexA then
+               --COMPARE recordVersion
+               switch
+                    case tLocalIndexA[xRecordID] < tServerIndexA[xRecordID]
+                         --RECORD ON THE CLOUD IS NEWER THAN CLIENT AND MUST BE DOWNLOADED
+                         --DO NOTHING
+                         break
+                         
+                    default
+                         --RECORD IS A PERFECT MATCH AND DOES NOT NEED TO BE DOWNLOADED
+                         delete var tServerIndexA[xRecordID]
+                         break
+               end switch
+          end if
+     end repeat
+     
+     --SET UP tToDownloadListA TO BE IN THE FORM NEEDED TO DO A cdb_batchReadCloud
+     --tToDownloadListA IS BASED ON THE DATA IN tServerIndexA
+     repeat for each key xRecordID in tServerIndexA
+          --ADD recordID TO tToDownloadListA
+          put empty into tToDownloadListA[cdb_getTableID(pInputA["cdbTableName"])][xRecordID]
+     end repeat
+     
+     --WHAT IS LEFT IN tServerIndexA IS A LIST OF recordIDs THAT NEED TO BE DOWNLOADED TO CLIENT
+     if tToDownloadListA is not empty then
+          put false into tToDownloadListA["errorChecking"]
+          put cdb_batchReadCloud(tToDownloadListA) into tRecordsA
+          if not cdb_result() then
+               --THE DOWNLOAD FAILED, RETURN ERROR
+               put false into tErrorA["completed"]
+               put "There was a problem getting needed records from the server for sync." into tErrorA["response"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+     end if
+     
+     --STORE DOWNLOADED RECORDS TO DISK
+     if tRecordsA is not empty then
+          put false into tRecordsA["errorChecking"]
+          get cdb_batchCreateLocal(tRecordsA)
+          if not cdb_result() then
+               --THE DOWNLOAD FAILED, RETURN ERROR
+               put false into tErrorA["completed"]
+               put "There was a problem storing sync data to disk." into tErrorA["response"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+     end if
+     
+     put true into tResultA["completed"]
+     put "cdb_sync" into tResultA["context"]
+     csi_saveResult tResultA
+     
+     ----------
+     
+     
+     --     --PRE-GENERATE 10% VALUES
+     --     if pInputA["callback"]["control"] is not empty and tCallBackDataA["recordSubTotal"] > 0 then
+     --          put tCallBackDataA["recordSubTotal"] div 10 into tMultiplier
+     --          put empty into tIncrementor
+     --          put 1 into tCount
+     --          repeat 10
+     --               put (tMultiplier * tCount) & lf after tIncrementor
+     --               add 1 to tCount
+     --          end repeat
+     --     end if
+     
+     --     --SEND CALL BACKS
+     --     if pInputA["callback"]["control"] is not empty and tCallBackDataA["recordSubTotal"] > 0 then
+     --          if tCounter is among the lines of tIncrementor then
+     --               put tCounter into tCallBackDataA["loadedSubTotal"]
+     --               dispatch pInputA["callback"]["handler"] to pInputA["callback"]["control"] with tCallBackDataA
+     --          end if
+     --     end if
+     
+     --     --SEND FINAL CALLBACK
+     --     if pInputA["callback"]["control"] is not empty and tCallBackDataA["recordSubTotal"] > 0 then
+     --          put tCallBackDataA["recordSubTotal"] into tCallBackDataA["loadedSubTotal"]
+     --          dispatch pInputA["callback"]["handler"] to pInputA["callback"]["control"] with tCallBackDataA
+     --     end if
+end cdb_sync
+
+
+
+private command _____HYPER_BLOBS
+end _____HYPER_BLOBS
+function cdb_getHyperBlob pInputA
+     local tBlobLink, tDownloadedTransaction, tFoundLine, tResultA, tResponse, tResult
+     local tTryDecodeTransaction
+     
+     if not(csi_checkContext("cdb_getHyperBlob",pInputA["cdbTableName"],pInputA["cdbTeamID"])) then return empty
+     
+     --BE SURE TO GET PROPER CASE OF pTableName
+     put lineOffset(pInputA["cdbTableName"],(the keys of gCSIteamDataA[pInputA["cdbTeamID"]])) into tFoundLine
+     put line tFoundLine of the keys of gCSIteamDataA[pInputA["cdbTeamID"]] into pInputA["cdbTableName"]
+     
+     if pInputA["hyperBlobID"] is empty then
+          put false into tResultA["completed"]
+          put "cdb_getHyperBlob" into tResultA["context"]
+          put "No HyperBlob ID was provided." into tResultA["response"]
+          csi_saveResult tResultA
+          return empty
+     end if
+     
+     --LEGACY liveEvents SUPPORT
+     if pInputA["liveEvents"] then
+          put "576a16ef-2076-419e-b50c-749cbdf95452" into pInputA["cdbTeamID"]
+          put "hyperblob" into pInputA["cdbTableName"]
+          put "advanced" into pInputA["outputFormat"]
+     end if
+     
+     if pInputA["outputFormat"] is empty or pInputA["outputFormat"] = "basic" then
+          put "basic" into pInputA["outputFormat"]
+     else
+          put "advanced" into pInputA["outputFormat"]
+     end if
+     
+     --BUILD LINK TO HYPER-BLOB
+     put "https://objects-us-west-1.dream.io/livecloud/" & urlEncode(pInputA["hyperBlobID"] & "@" & pInputA["cdbTableName"] & "-" & pInputA["cdbTeamID"]) & "?x=" & the seconds into tBlobLink
+     
+     --DOWNLOAD BLOB
+     put URL (tBlobLink) into tDownloadedTransaction
+     put it into tResponse
+     put the result into tResult
+     if "404 not found" is in the result then
+          --404 ERROR
+          put false into tResultA["completed"]
+          put "cdb_getHyperBlob" into tResultA["context"]
+          put "Error 404, file not found. HyperBlob id:" && pInputA["hyperBlobID"] into tResultA["response"]
+          csi_saveResult tResultA
+          return empty
+     end if
+     
+     if pInputA["liveEvents"] then
+          put base64Decode(tDownloadedTransaction) into tDownloadedTransaction
+          decrypt tDownloadedTransaction using "aes256" with password "?unep8aye8r546as_ubE*uqa?ruducra"
+          put it into tDownloadedTransaction
+     else
+          put csi_decrypt(tDownloadedTransaction,"cdbBlob") into tDownloadedTransaction
+          
+          try
+               put arrayDecode(tDownloadedTransaction) into tTryDecodeTransaction
+          catch tError
+               put tDownloadedTransaction into tTryDecodeTransaction
+          end try
+          put tTryDecodeTransaction into tDownloadedTransaction
+     end if
+     
+     if tDownloadedTransaction is empty then
+          --FAILED DECRYPT
+          put false into tResultA["completed"]
+          put "cdb_getHyperBlob" into tResultA["context"]
+          put "There was an error decrypting HyperBlob. The file may be corrupted." into tResultA["response"]
+          csi_saveResult tResultA
+          return empty
+     end if
+     
+     put true into tResultA["completed"]
+     put "cdb_getHyperBlob" into tResultA["context"]
+     csi_saveResult tResultA
+     
+     switch pInputA["outputFormat"]
+          case "basic"
+               return tDownloadedTransaction["hyperblob"]
+               break
+               
+          case "advanced"
+               return tDownloadedTransaction
+               break
+     end switch
+end cdb_getHyperBlob
+
+
+
+private command _____LIST
+end _____LIST
+function cdb_listLocal pInputA
+     local tDataA, tErrorA, tValue
+     
+     --LEFT THE pInputA["cdbTableName"] FEATURE (WHICH IS UNDOCUMENTED) IN THE API
+     --FOR PARSING pOutput FORMAT FOR QUERIES
+     
+     if not(csi_checkContext("cdb_listLocal",pInputA["cdbTableName"],pInputA["teamID"])) then return empty
+     
+     if pInputA["keyList"] is empty then put "cdbRecordID" into pInputA["keyList"]
+     if pInputA["sortType"] is empty then put empty into pInputA["sortType"]
+     if pInputA["sortDirection"] is empty then put empty into pInputA["sortDirection"]
+     put gCSIindexTableIDA[pInputA["cdbTableName"]] into pInputA["tableID"]
+     
+     switch
+          case pInputA["keyList"] is "cdbRecordID" //USER WANTS LIST OF RECORD IDS
+               repeat for each key xClusterID in gCSIdatabaseA [gCSIteamDataA [pInputA["teamID"]] [pInputA["cdbTableName"]] ["tableID"]]
+                    put the keys of gCSIdatabaseA [gCSIteamDataA [pInputA["teamID"]] [pInputA["cdbTableName"]] ["tableID"]][xClusterID] into tValue
+                    put tValue into tDataA[tValue]
+               end repeat
+               break
+               
+               --           case pInputA["keyList"] is "cdbRecordID" and pInputA["cdbTableName"] is an array //UNDOCUMENTED FEATURE
+               --                put the keys of pInputA["cdbTableName"] into tData
+               --                break
+               
+               
+               
+               --           case pInputA["cdbTableName"] is an array //UNDOCUMENTED FEATURE
+               --                repeat for each key xRecordID in pInputA["cdbTableName"]
+               --                     put empty into tLine
+               --                     repeat for each line xRequestedKey in pInputA["keyList"]
+               --                          put pInputA["cdbTableName"][xRecordID][xRequestedKey] & comma after tLine
+               --                     end repeat
+               --                     put char 1 to -2 of tLine & lf after tData
+               --                end repeat
+               --                delete char -1 of tData
+               --                break
+               
+          default //USER WANTS A SPECIFIC KEY VALUE
+               repeat for each key xClusterID in gCSIdatabaseA [gCSIteamDataA [pInputA["teamID"]] [pInputA["cdbTableName"]] ["tableID"]]
+                    repeat for each key xRecordID in gCSIdatabaseA[pInputA["tableID"]] [xClusterID]
+                         put gCSIdatabaseA[pInputA["tableID"]][xClusterID][xRecordID][pInputA["keyList"]] into tValue
+                         put tValue into tDataA[tValue]
+                    end repeat
+               end repeat
+               break
+     end switch
+     
+     --RETURN ARRAY TO LIST
+     combine tDataA using lf
+     
+     --OPTIONAL SORTING
+     if pInputA["sortDirection"] is not empty or pInputA["sortType"] is not empty then
+          if pInputA["sortDirection"] is empty then put "ascending" into pInputA["sortDirection"]
+          if pInputA["sortType"] is empty then put "text" into pInputA["sortType"]
+     end if
+     
+     switch
+          case pInputA["sortDirection"] is "ascending" and pInputA["sortType"] is "numeric"
+               sort lines of tDataA ascending numeric by item 1 of each
+               break
+          case pInputA["sortDirection"] is "ascending" and pInputA["sortType"] is "dateTime"
+               sort lines of tDataA ascending datetime by item 1 of each
+               break
+          case pInputA["sortDirection"] is "ascending" and pInputA["sortType"] is not empty
+               sort lines of tDataA ascending text by item 1 of each
+               break
+          case pInputA["sortDirection"] is "descending" and pInputA["sortType"] is "numeric"
+               sort lines of tDataA descending numeric by item 1 of each
+               break
+          case pInputA["sortDirection"] is "descending" and pInputA["sortType"] is "dateTime"
+               sort lines of tDataA descending datetime by item 1 of each
+               break
+          case pInputA["sortDirection"] is "descending" and pInputA["sortType"] is not empty
+               sort lines of tDataA descending text by item 1 of each
+               break
+          default
+               --DON'T SORT
+               break
+     end switch
+     
+     --SAVE RESULTS
+     put true into tErrorA["completed"]
+     put empty into tErrorA["response"]
+     put "cdb_listLocal" into tErrorA["context"]
+     csi_saveResult tErrorA
+     
+     return tDataA
+end cdb_listLocal
+
+
+function cdb_listCloud pInputA
+     local tErrorA, tParametersA, tResultA, tServerResponseA
+     
+     --LEFT THE pInputA["cdbTableName"] FEATURE (WHICH IS UNDOCUMENTED) IN THE API
+     --FOR PARSING pOutput FORMAT FOR QUERIES
+     
+     if not(csi_checkContext("cdb_listCloud",pInputA["cdbTableName"],pInputA["teamID"])) then return empty
+     if pInputA["keyList"] is empty then put "cdbRecordID" into pInputA["keyList"]
+     
+     --BUILD PACKAGE
+     put "listCloudValues" into tParametersA["requestType"]
+     put gCSIteamDataA[pInputA["teamID"]][pInputA["cdbTableName"]]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put pInputA["teamID"] into tParametersA["teamID"]
+     put pInputA["cdbTableName"] into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer pInputA,tParametersA,"ignore"
+     put the result into tResultA
+     
+     if tResultA["uploadStatus"] then
+          --DOWNLOAD THE RESULTS FROM THE SERVER
+          put csi_downloadServerResponse(tResultA["fileName"],pInputA["cdbTableName"],pInputA["teamID"]) into tServerResponseA
+          if not cdb_Result() then
+               put "There was a problem getting a response from the server for listCloudValues request." into tErrorA["response"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+          
+          put true into tErrorA["completed"]
+          csi_saveResult tErrorA
+          return tServerResponseA["response"]
+     else
+          --THE UPLOAD FAILED, RETURN ERROR
+          put false into tErrorA["completed"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+end cdb_listCloud
+
+
+
+private command _____COUNT
+end _____COUNT
+function cdb_countLocal pTableName
+     local tErrorA, tTableID, tTeamID, tTotalRecords
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_countLocal" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     put 0 into tTotalRecords
+     put empty into tTeamID
+     
+     if not(csi_checkContext("cdb_countLocal",pTableName,tTeamID)) then return empty
+     
+     --WE NEED TO CRAWL EACH CLUSTER IN A GIVEN TABLE ID
+     --COUNT THE NUMBER OF ELEMENTS IN EACH CLUSTER
+     put gCSIteamDataA[tTeamID][pTableName]["tableID"] into tTableID
+     repeat for each key xClusterID in gCSIdatabaseA[tTableID]
+          add the num of elements of gCSIdatabaseA[tTableID][xClusterID] to tTotalRecords
+     end repeat
+     
+     put true into tErrorA["completed"]
+     csi_saveResult tErrorA
+     
+     return tTotalRecords
+end cdb_countLocal
+
+
+function cdb_countCloud pTableName
+     local tErrorA, tParametersA, tRecordA, tResultA, tServerResponseA
+     local tTeamID, tTotalRecords
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_countCloud" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     put 0 into tTotalRecords
+     put empty into tTeamID
+     
+     if not(csi_checkContext("cdb_countCloud",pTableName,tTeamID)) then return empty
+     
+     --BUILD PACKAGE
+     put "cloudRecordCount" into tParametersA["requestType"]
+     put gCSIteamDataA[tTeamID][pTableName]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put tTeamID into tParametersA["teamID"]
+     put pTableName into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer tRecordA,tParametersA,"ignore"
+     put the result into tResultA
+     
+     if tResultA["uploadStatus"] then
+          --DOWNLOAD THE RESULTS FROM THE SERVER
+          put csi_downloadServerResponse(tResultA["fileName"],pTableName,tTeamID) into tServerResponseA
+          if not cdb_Result() then
+               put "There was a problem getting a response from the server for cloudRecordCount request." into tErrorA["response"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+          
+          put true into tErrorA["completed"]
+          csi_saveResult tErrorA
+          return tServerResponseA["response"]
+     else
+          --THE UPLOAD FAILED, RETURN ERROR
+          put false into tErrorA["completed"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+end cdb_countCloud
+
+
+
+private command _____LOOK_UP
+end _____LOOK_UP
+function cdb_lookUpLocalValue pInputA
+     local tData, tErrorA, tRecordA
+     
+     if not(csi_checkContext("cdb_lookUpLocalValue",pInputA["cdbTableName"],pInputA["cdbTeamID"])) then return empty
+     if not(csi_checkRecordID("cdb_lookUpLocalValue",pInputA["cdbRecordID"],true,pInputA["cdbTableName"],pInputA["cdbTeamID"])) then \
+           return empty //INVALID RECORDID, OR RECORDID DOES NOT EXIST
+     
+     if pInputA["key"] is empty then
+          put false into tErrorA["completed"]
+          put "The lookup key was not specified." into tErrorA["response"]
+          put "cdb_lookUpLocalValue" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     --GET TABLE ID
+     put gCSIindexTableIDA[pInputA["cdbTableName"]] into pInputA["tableID"]
+     
+     --PULL VALUE OUT OF gCSIdatabaseA
+     put gCSIdatabaseA[pInputA["tableID"]][char 1 to gCSIconfigA["CassiaDB"]["recordCluster"] of pInputA["cdbRecordID"]][pInputA["cdbRecordID"]][pInputA["key"]] into tData
+     
+     --SAVE RESULTS
+     put true into tErrorA["completed"]
+     put empty into tErrorA["response"]
+     put "cdb_lookUpLocalValue" into tErrorA["context"]
+     csi_saveResult tErrorA
+     
+     return tData
+end cdb_lookUpLocalValue
+
+
+function cdb_lookUpCloudValue pInputA
+     local tErrorA, tFile, tFileName, tServerResponseA, tParametersA, tResultA
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_lookUpCloudValue" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     --VERIFY DEV IS SENDING AN ARRAY
+     if pInputA is not an array then
+          put "Expecting data passed to cdb_lookUpCloudValue to be an array." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     if not(csi_checkContext("cdb_lookUpCloudValue",pInputA["cdbTableName"],pInputA["cdbTeamID"])) then return empty
+     if not(csi_checkRecordID("cdb_lookUpCloudValue",pInputA["cdbRecordID"],false,pInputA["cdbTableName"],pInputA["cdbTeamID"])) then \
+           return empty //INVALID RECORDID, OR RECORDID DOES NOT EXIST
+     
+     --BUILD PACKAGE
+     put "lookUpCloudValue" into tParametersA["requestType"]
+     put gCSIteamDataA[pInputA["cdbTeamID"]][pInputA["cdbTableName"]]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put pInputA["cdbTeamID"] into tParametersA["teamID"]
+     put pInputA["cdbTableName"] into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer pInputA,tParametersA,"ignore"
+     put the result into tResultA
+     
+     --SAVE RESULTS     
+     if tResultA["uploadStatus"] then
+          --DOWNLOAD THE RESULTS FROM THE SERVER
+          put csi_downloadServerResponse(tResultA["fileName"],pInputA["cdbTableName"],pInputA["cdbTeamID"]) into tServerResponseA
+          if not cdb_Result() then
+               put "There was a problem getting a response from the server for cdb_lookUpCloudValue request." into tErrorA["response"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+          
+          put true into tErrorA["completed"]
+          csi_saveResult tErrorA
+          return tServerResponseA["response"]
+     else
+          --THE UPLOAD FAILED, RETURN ERROR
+          put false into tErrorA["completed"]
+          put "Error reading cloud records." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+end cdb_lookUpCloudValue
+
+
+
+private command _____LIST_UNIQUE_VALUES
+end _____LIST_UNIQUE_VALUES
+function cdb_listUniqueValues pKeyList, pDatabaseA, pTableName, pTeamID
+     local tErrorA, tLineCounter, tOutputA, tRecordA, tSchema
+     
+     if not(csi_checkContext("cdb_listUniqueValues",pTableName,pTeamID)) then return empty
+     
+     --VALIDATE THE SEARCHED KEYS AGAINST THE SCHEMA
+     put csi_GetSchema("advanced",pTableName,pTeamID) into tSchema
+     if pKeyList is empty then
+          put tSchema into pKeyList
+     else
+          repeat for each line xLine in pKeyList
+               if xLine is not among the lines of tSchema then
+                    put false into tErrorA["completed"]
+                    put "You cannot list unique values for a key that does not exist:" && xLine into tErrorA["response"]
+                    put "cdb_listUniqueValues" into tErrorA["context"]
+                    csi_saveResult tErrorA
+                    return empty
+               end if
+          end repeat
+     end if
+     
+     --CONVERT SCHEMA KEYS TO NUMBERS FOR EASE OF LOOKUP
+     put csi_GetSchema("raw",pTableName,pTeamID) into tSchema
+     set the wholeMatches to true
+     put 0 into tLineCounter
+     repeat (the num of lines of pKeyList)
+          add 1 to tLineCounter
+          put comma & itemOffset(line tLineCounter of pKeyList,tSchema) after line tLineCounter of pKeyList
+     end repeat
+     set the wholeMatches to false
+     
+     --ITERATE THROUGH THE KEYS AND LOAD THE OUTPUT ARRAY
+     if pDatabaseA is not an array then put gCSIdatabaseA[pTeamID][pTableName] into pDatabaseA
+     repeat for each key xKey in pDatabaseA
+          put pDatabaseA[xKey] into tRecordA
+          split tRecordA using "|"
+          repeat for each line xLine in pKeyList
+               put true into tOutputA[item 1 of xLine][tRecordA[item 2 of xLine]]
+          end repeat
+     end repeat
+     
+     --CLEAN UP THE RESULTS FOR
+     repeat for each key xKey in tOutputA
+          combine tOutputA[xKey] with lf and comma
+          replace (",true" & lf) with lf in tOutputA[xKey]
+          delete char -5 to -1 of tOutputA[xKey]
+     end repeat
+     
+     put true into tErrorA["completed"]
+     put empty into tErrorA["response"]
+     put "cdb_listUniqueValues" into tErrorA["context"]
+     csi_saveResult tErrorA
+     
+     if the num of lines of pKeyList = 1 then return tOutputA[item 1 of pKeyList] else return tOutputA
+end cdb_listUniqueValues
+
+
+
+private command _____OTHER
+end _____OTHER
+function cdb_sdkBuild
+     return csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["sdkBuildDate"]),"transportDetails")
+end cdb_sdkBuild
+
+
+command cdb_sendEmail pInputA
+     csi_sendEmail pInputA
+end cdb_sendEmail
+
+
+function cdb_isValidRecordID pInput
+     local tInputA
+     
+     --TURN THIS PARAMETER INTO AN ARRAY IF NEEDED
+     if pInput is not an array then
+          repeat for each line xRecordID in pInput
+               put empty into tInputA[xRecordID]
+          end repeat
+     end if
+     
+     get csi_isValidRecordID(tInputA)
+     return it
+end cdb_isValidRecordID
+
+
+
+private command _____ACCOUNT
+end _____ACCOUNT
+command cdb_createAccount pInputA
+     local tErrorA, tParametersA, tRequiredList, tResultA, tServerResponseA
+     local tTableName, tTeamID
+     
+     //DOCUMENTATION
+     //pInputA MUST CONTAIN THE FOLLOWING KEYS AND A VALUE FOR EACH KEY
+     //EXPECTED KEYS: email, password, firstName, lastName, cdbTableName, keys
+     //QUALIFIED ARRAY WILL BE SENT TO THE ACCOUNTING SERVER
+     //THE ACCOUNTING SERVER WILL THEN COMMUNICATE WITH THE DATA SERVER
+     //THE ACCOUNTING SERVER WILL RETURN NEEDED DATA TO BUILD CONFIG FILE ON DEV SYSTEM
+     
+     --CLEAN OUT CONFIG FOR NEW ACCOUNT
+     delete var gCSIconfigA["Client"]
+     delete var gCSIteamDataA
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_createAccount" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     --VALIDATE INPUT
+     if pInputA is not an array then
+          put "pInputA is not an array." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     --CHECK EACH KEY OF INPUT
+     put "email,password,firstName,lastName,cdbTableName,keys" into tRequiredList
+     repeat for each key xKey in pInputA
+          switch
+               case itemOffset(xKey,tRequiredList) = 0
+                    break
+                    
+               case pInputA[xKey] is empty
+                    put "The following key:" && xKey && "is empty. Each key must have a value." into tErrorA["response"]
+                    csi_saveResult tErrorA
+                    return empty
+                    break
+          end switch
+     end repeat
+     
+     csi_setupConfigForAccountsAccess
+     
+     --BUILD PACKAGE
+     put "createAccount" into tParametersA["requestType"]
+     put "LiveCloudAccounts_" & "4f1306fd-7cee-4d69-af04-5424aaffb7b4" into tParametersA["instanceResponseFolder"]
+     put "4f1306fd-7cee-4d69-af04-5424aaffb7b4" into tParametersA["teamID"]
+     put "cdbAccountsUsers" into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer pInputA,tParametersA
+     put the result into tResultA
+
+     if tResultA["uploadStatus"] then
+          --DOWNLOAD THE RESULTS FROM THE SERVER
+          put csi_downloadServerResponse(tResultA["fileName"],tParametersA["tableName"],tParametersA["teamID"]) into tServerResponseA
+          if not cdb_Result() then
+               put "There was a problem getting a response from the server for cdb_createAccount. Please inform Canela about this." into tErrorA["response"]
+               csi_saveResult tErrorA
+               
+               --REMOVE TEMPORARY VAR DATA
+               delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+               
+               return empty
+          end if
+     else
+          --REMOVE TEMPORARY VAR DATA
+          delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          exit cdb_createAccount
+     end if
+     
+     --HANDLE ERRORS
+     if tServerResponseA["response"]["result"] is not empty then
+          --CHECK FOR BAD PASSWORD OR USERNAME
+          switch tServerResponseA["response"]["result"]
+               case "userName taken"
+                    put "This account is already taken. If this is your account, please access your account with function cdb_getSDK()"
+                    break
+                    
+               case "server issue"
+                    put "There is a problem with the server that is preventing you from completing this task. Please inform a Canela representative that creating new accounts is down." & lf & "Server response:" && tServerResponseA["response"]["response"]
+                    break
+                    
+               case "schema key error"
+                    put tServerResponseA["response"]["response"]
+                    break
+          end switch
+          
+          --REMOVE TEMPORARY VAR DATA
+          delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          exit cdb_createAccount
+          --     else
+          --          --THE UPLOAD FAILED, RETURN ERROR
+          --          put "There was a problem accessing the server." & lf & "Error:" && gCDBresultA["recent"]["response"]
+          
+          --          put false into tErrorA["completed"]
+          --          csi_saveResult tErrorA
+          
+          --          --REMOVE TEMPORARY VAR DATA
+          --          delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          --          exit cdb_createAccount
+     end if
+     
+     --REMOVE TEMPORARY AS WELL AS CURRENT ACCOUNT INFO
+     delete var gCSIconfigA["Client"]
+     delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+     
+     --MAKE NEW CONFIG FILE ON DEV'S SYSTEM
+     --BASIC VARIABLES WE ARE GOING TO NEED
+     put tServerResponseA["response"]["teamID"] into tTeamID
+     put tServerResponseA["response"]["tableName"] into tTableName
+     
+     --CONFIGURE gCSIconfigA VARIABLE
+     put tServerResponseA["response"]["authKey"] into gCSIconfigA["CassiaDB"]["authKey"]
+     put base64Encode(csi_encrypt(tServerResponseA["response"]["keySizeLimit"],"transportDetails")) into gCSIconfigA["CassiaDB"]["coreValues"]["keySizeLimit"] --keySizeLimit
+     put tServerResponseA["response"]["instanceName"] into gCSIconfigA["Client"][tTeamID][tTableName]["instanceName"]
+     put tServerResponseA["response"]["tableDomain"] into gCSIconfigA["Client"][tTeamID][tTableName]["tableDomain"]
+     put tServerResponseA["response"]["tableID"] into gCSIconfigA["Client"][tTeamID][tTableName]["tableID"]
+     put tServerResponseA["response"]["teamID"] into gCSIconfigA["Client"][tTeamID][tTableName]["teamID"]
+     put tServerResponseA["response"]["devKeys"] into gCSIconfigA["Client"][tTeamID][tTableName]["devKeys"]
+     put tServerResponseA["response"]["internalKeys"] into gCSIconfigA["Client"][tTeamID][tTableName]["internalKeys"]
+     
+     csi_saveConfig gCSIconfigA
+     csi_buildTeamDataA
+     csi_buildInternalIndexes
+     cdb_loadTable
+     
+     put "Your account has been created successfully."
+end cdb_createAccount
+
+
+command cdb_createTable pInputA
+     local tDevTeamID, tErrorA, tHoldA, tInputA, tParametersA
+     local tRecordID, tRequiredList, tResultA, tTableID, tTeamID
+     local tUsersOutputA
+     
+     //DOCUMENTATION
+     //INPUT ARRAY
+     //EXPECTED KEYS: email, password, cdbTableName, keys
+     //VERIFY LOCALLY THE tableName HAS NOT ALREADY BEEN TAKEN
+     //QUALIFIED ARRAY WILL BE SENT TO THE ACCOUNTING SERVER TO AUTHENTICATE DEV
+     //QUERY ACCOUNTING SERVER ABOUT CURRENT TABLES ASSOCIATED TO DEV
+     
+     --REMOVE TEMPORARY VAR DATA
+     delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+     delete var gCSIteamDataA["a364ba8c-9e42-431b-bb72-3580296a4435"]
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_createTable" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     --VALIDATE INPUT
+     if pInputA is not an array then
+          put "pInputA is not an array." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     --CHECK EACH KEY OF INPUT
+     put "email,password,tableName,keys" into tRequiredList
+     repeat for each key xKey in pInputA
+          switch
+               case itemOffset(xKey,tRequiredList) = 0
+                    break
+                    
+               case pInputA[xKey] is empty
+                    put "The following key:" && xKey && "is empty. Each key must have a value." into tErrorA["response"]
+                    csi_saveResult tErrorA
+                    
+                    --REMOVE TEMPORARY VAR DATA
+                    delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+                    return empty
+                    break
+          end switch
+     end repeat
+     
+     --VERIFY LOCALLY THAT tableName HAS NOT BEEN TAKEN
+     put cdb_getTeamID() into tDevTeamID
+     if not cdb_result() then exit cdb_createTable
+     if lineOffset(pInputA["cdbTableName"],cdb_getTableNames(tDevTeamID)) > 0 then
+          put "Specified tableName is already taken:" && pInputA["cdbTableName"] into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     --TEMPORARILY SETUP ACCESS TO ACCOUNTS SERVER
+     csi_setupConfigForAccountsAccess
+     
+     --VERIFY CREDENTIALS WITH ACCOUNTING SERVER
+     put gCSIindexTableIDA["cdbAccountsUsers"] into tTableID
+     
+     --QUERY 1
+     put pInputA["email"] into tInputA["batchQuery"][tTableID][1]["value"]
+     put "email" into tInputA["batchQuery"][tTableID][1]["key"]
+     put "=" into tInputA["batchQuery"][tTableID][1]["operator"]
+     
+     --QUERY 2
+     put pInputA["password"] into tInputA["batchQuery"][tTableID][2]["value"]
+     put "password" into tInputA["batchQuery"][tTableID][2]["key"]
+     put "=" into tInputA["batchQuery"][tTableID][2]["operator"]
+     
+     --QUERY SETTINGS
+     put "logicalAND" into tInputA["settings"]["mode"]
+     put "recordData" into tInputA["settings"]["resultFormat"]
+     
+     put cdb_batchQueryCloud(tInputA) into tUsersOutputA
+     if not cdb_Result() then
+          --WE HAD A PROBLEM ACCESSING THE LIVECLOUD ACCOUNTS SERVER
+          put gCDBresultA["recent"]["response"]
+          return empty
+          exit cdb_createTable
+     end if
+     
+     put keys of tUsersOutputA into tTeamID
+     if the num of elements of tUsersOutputA[tTeamID][1] = 0 then
+          --DEV HAS ENTERED IN BAD CREDENTIALS
+          put "Your account credentials may be incorrect. Please check your values and try again." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+          exit cdb_createTable
+     end if
+     
+     --INFORM ACCOUNTING SERVER ABOUT NEW TABLE
+     put empty into tInputA
+     
+     put "cdbAccountsTables" into tInputA["cdbTableName"]
+     put gCSIindexTeamIDA[gCSIindexTableIDA["cdbAccountsTables"]] into tInputA["cdbTeamID"]
+     put pInputA["keys"] into tInputA["devKeys"]
+     put pInputA["tableName"] into tInputA["tableName"]
+     put uuid() into tInputA["tableID"]
+     
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] into tInputA["instanceName"]
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] into tInputA["instanceRequestFolder"]
+     put tDevTeamID into tInputA["teamID"]
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] & "_" & tDevTeamID into tInputA["instanceResponseFolder"]
+     put "9000000" into tInputA["keySizeLimit"]
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into tInputA["tableDomain"]
+     
+     put cdb_createCloud(tInputA) into tRecordID
+     if not cdb_result() then
+          put gCDBresultA["recent"]["response"]
+          exit cdb_createTable
+     end if
+     
+     --REMOVE TEMPORARY AS WELL AS CURRENT ACCOUNT INFO
+     delete var gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+     delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+     
+     --ENGAGE TEMPORARY ACCESS TO DATA SERVER
+     csi_setupConfigForDataAccess
+     
+     --INFORM DATA SERVER ABOUT NEW TABLE
+     put tInputA into tHoldA
+     delete var tInputA
+     
+     put tHoldA["tableName"] into tInputA["tableName"]
+     put tHoldA["devKeys"] into tInputA["devKeys"]
+     put tHoldA["instanceName"] into tInputA["instanceName"]
+     put tHoldA["instanceRequestFolder"] into tInputA["instanceRequestFolder"]
+     put tHoldA["instanceResponseFolder"] into tInputA["instanceResponseFolder"]
+     put tHoldA["tableDomain"] into tInputA["tableDomain"]
+     put tHoldA["teamID"] into tInputA["teamID"]
+     put tHoldA["tableID"] into tInputA["tableID"]
+     put "cdbTeamID,cdbRecordID,cdbTableID,cdbTableName" into tInputA["internalKeys"]
+     
+     --BUILD PACKAGE
+     delete var tParametersA
+     put "updateUsersConfigDataServer" into tParametersA["requestType"]
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] & "_" & "a364ba8c-9e42-431b-bb72-3580296a4435" into tParametersA["instanceResponseFolder"]
+     put "a364ba8c-9e42-431b-bb72-3580296a4435" into tParametersA["teamID"]
+     put "cdbDataUsers" into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer tInputA,tParametersA
+     put the result into tResultA
+     if not cdb_result() then
+          put gCDBresultA["recent"]["response"]
+          exit cdb_createTable
+     end if
+     
+     --REMOVE TEMPORARY DATA SERVER ACCESS
+     delete var gCSIconfigA["Client"]["a364ba8c-9e42-431b-bb72-3580296a4435"]
+     
+     --UPDATE LOCAL CONFIG FILE WITH NEW TABLE INFORMATION
+     put tHoldA["devKeys"] into gCSIconfigA["Client"][tDevTeamID] [tHoldA["tableName"]] ["devKeys"]
+     put tHoldA["instanceName"] into gCSIconfigA["Client"][tDevTeamID] [tHoldA["tableName"]] ["instanceName"]
+     put tHoldA["tableDomain"] into gCSIconfigA["Client"][tDevTeamID] [tHoldA["tableName"]] ["tableDomain"]
+     put tHoldA["tableID"] into gCSIconfigA["Client"][tDevTeamID] [tHoldA["tableName"]] ["tableID"]
+     put tHoldA["teamID"] into gCSIconfigA["Client"][tDevTeamID] [tHoldA["tableName"]] ["teamID"]
+     put tInputA["internalKeys"] into gCSIconfigA["Client"][tDevTeamID] [tHoldA["tableName"]] ["internalKeys"]
+     
+     csi_saveConfig gCSIconfigA
+     csi_buildTeamDataA
+     csi_buildInternalIndexes
+     cdb_loadTable
+     
+     put "Your table has been created:" && tHoldA["tableName"]
+end cdb_createTable
+
+
+command cdb_updateTable pInputA
+     local tDevTeamID, tErrorA, tHoldA, tInputA, tParametersA
+     local tRecordID, tRequiredList, tResultA, tTableID, tTablesOutputA
+     local tTeamID, tUsersOutputA
+     
+     //DOCUMENTATION
+     //INPUT ARRAY
+     //EXPECTED KEYS: email, password, cdbTableName, keys
+     //VERIFY LOCALLY THE tableName HAS NOT ALREADY BEEN TAKEN
+     //QUALIFIED ARRAY WILL BE SENT TO THE ACCOUNTING SERVER TO AUTHENTICATE DEV
+     //QUERY ACCOUNTING SERVER ABOUT CURRENT TABLES ASSOCIATED TO DEV
+     
+     --REMOVE TEMPORARY VAR DATA
+     delete var gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+     delete var gCSIconfigA["Client"]["a364ba8c-9e42-431b-bb72-3580296a4435"]
+     delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+     delete var gCSIteamDataA["a364ba8c-9e42-431b-bb72-3580296a4435"]
+     
+     put cdb_getTeamID() into tDevTeamID
+     if not cdb_result() then exit cdb_updateTable
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_createTable" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     --VALIDATE INPUT
+     if pInputA is not an array then
+          put "pInputA is not an array." into tErrorA["response"]
+          csi_saveResult tErrorA
+          
+          --REMOVE TEMPORARY ACCOUNT ACCESS
+          delete var gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          return empty
+     end if
+     
+     --CHECK EACH KEY OF INPUT
+     put "email,password,tableName,keys" into tRequiredList
+     repeat for each key xKey in pInputA
+          switch
+               case itemOffset(xKey,tRequiredList) = 0
+                    break
+                    
+               case pInputA[xKey] is empty
+                    put "The following key:" && xKey && "is empty. Each key must have a value." into tErrorA["response"]
+                    csi_saveResult tErrorA
+                    
+                    --REMOVE TEMPORARY ACCOUNT ACCESS
+                    delete var gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+                    delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+                    return empty
+                    break
+          end switch
+     end repeat
+     
+     --TEMPORARILY SETUP ACCESS TO ACCOUNTS SERVER
+     csi_setupConfigForAccountsAccess
+     
+     --VERIFY CREDENTIALS WITH ACCOUNTING SERVER
+     put gCSIindexTableIDA["cdbAccountsUsers"] into tTableID
+     
+     --QUERY 1
+     put pInputA["email"] into tInputA["batchQuery"][tTableID][1]["value"]
+     put "email" into tInputA["batchQuery"][tTableID][1]["key"]
+     put "=" into tInputA["batchQuery"][tTableID][1]["operator"]
+     
+     --QUERY 2
+     put pInputA["password"] into tInputA["batchQuery"][tTableID][2]["value"]
+     put "password" into tInputA["batchQuery"][tTableID][2]["key"]
+     put "=" into tInputA["batchQuery"][tTableID][2]["operator"]
+     
+     --QUERY SETTINGS
+     put "logicalAND" into tInputA["settings"]["mode"]
+     put "recordData" into tInputA["settings"]["resultFormat"]
+     
+     put cdb_batchQueryCloud(tInputA) into tUsersOutputA
+     if not cdb_Result() then
+          --WE HAD A PROBLEM ACCESSING THE LIVECLOUD ACCOUNTS SERVER
+          put gCDBresultA["recent"]["response"]
+          return empty
+          
+          --REMOVE TEMPORARY ACCOUNT ACCESS
+          delete var gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          exit cdb_updateTable
+     end if
+     
+     put keys of tUsersOutputA into tTeamID
+     if the num of elements of tUsersOutputA[tTeamID][1] = 0 then
+          --DEV HAS ENTERED IN BAD CREDENTIALS
+          put "Your account credentials may be incorrect. Please check your values and try again." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+          
+          --REMOVE TEMPORARY ACCOUNT ACCESS
+          delete var gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          exit cdb_updateTable
+     end if
+     
+     --ACCOUNT CREDENTIALS ARE GOOD
+     --GET RECORD ID OF TABLE BEING MODIFIED
+     delete var tInputA
+     put gCSIindexTableIDA["cdbAccountsUsers"] into tTableID
+     
+     --QUERY 1
+     put pInputA["email"] into tInputA["batchQuery"][tTableID][1]["value"]
+     put "email" into tInputA["batchQuery"][tTableID][1]["key"]
+     put "=" into tInputA["batchQuery"][tTableID][1]["operator"]
+     
+     --QUERY 2
+     put pInputA["password"] into tInputA["batchQuery"][tTableID][2]["value"]
+     put "password" into tInputA["batchQuery"][tTableID][2]["key"]
+     put "=" into tInputA["batchQuery"][tTableID][2]["operator"]
+     
+     --QUERY SETTINGS
+     put "logicalAND" into tInputA["settings"]["mode"]
+     put "recordData" into tInputA["settings"]["resultFormat"]
+     
+     put cdb_batchQueryCloud(tInputA) into tUsersOutputA
+     if not cdb_Result() then
+          --WE HAD A PROBLEM ACCESSING THE LIVECLOUD ACCOUNTS SERVER
+          put gCDBresultA["recent"]["response"]
+          return empty
+          
+          --REMOVE TEMPORARY ACCOUNT ACCESS
+          delete var gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          exit cdb_updateTable
+     end if
+     
+     delete var tInputA
+     put the keys of tUsersOutputA[tTeamID][1] into tRecordID
+     put tUsersOutputA[tTeamID][1][tRecordID]["linkToTables"] into tInputA["cdbRecordID"]
+     put "cdbAccountsTables" into tInputA["cdbTableName"]
+     put tTeamID into tInputA["cdbTeamID"]
+     
+     put cdb_readCloud(tInputA) into tTablesOutputA
+     if not cdb_result() then
+          --PROBLEM DOING cdb_readCloud
+          put gCDBresultA["recent"]["response"]
+          return empty
+          
+          --REMOVE TEMPORARY ACCOUNT ACCESS
+          delete var gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+          exit cdb_updateTable
+     end if
+     
+     --INFORM ACCOUNTING SERVER ABOUT UPDATED TABLE
+     put empty into tInputA
+     
+     put tUsersOutputA[tTeamID][1][tRecordID]["linkToTables"] into tInputA["cdbRecordID"]
+     put "cdbAccountsTables" into tInputA["cdbTableName"]
+     put pInputA["keys"] into tInputA["devKeys"]
+     
+     cdb_updateCloud tInputA
+     if not cdb_result() then
+          put gCDBresultA["recent"]["response"]
+          exit cdb_updateTable
+     end if
+     
+     --REMOVE TEMPORARY ACCOUNT ACCESS
+     delete var gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+     delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+     
+     --ENGAGE TEMPORARY ACCESS TO DATA SERVER
+     csi_setupConfigForDataAccess
+     
+     --INFORM DATA SERVER ABOUT UPDATED TABLE
+     delete var tInputA
+     
+     put pInputA["tableName"] into tInputA["tableName"]
+     put gCSIindextableIDA[tInputA["tableName"]] into tInputA["tableID"]
+     put pInputA["keys"] into tInputA["devKeys"]
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] into tInputA["instanceName"]
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] into tInputA["instanceRequestFolder"]
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] & "_" & tDevTeamID into tInputA["instanceResponseFolder"]
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into tInputA["tableDomain"]
+     put tDevTeamID into tInputA["teamID"]
+     --     put uuid() into tInputA["tableID"]
+     put "cdbTeamID,cdbRecordID,cdbTableID,cdbTableName" into tInputA["internalKeys"]
+     put gCSIindexTeamIDA[gCSIindexTableIDA["cdbAccountsTables"]] into tInputA["cdbTeamID"]
+     put "9000000" into tInputA["keySizeLimit"]
+          
+     --BUILD PACKAGE
+     delete var tParametersA
+     put "updateUsersConfigDataServer" into tParametersA["requestType"]
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] & "_" & "a364ba8c-9e42-431b-bb72-3580296a4435" into tParametersA["instanceResponseFolder"]
+     put "a364ba8c-9e42-431b-bb72-3580296a4435" into tParametersA["teamID"]
+     put "cdbDataUsers" into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer tInputA,tParametersA
+     put the result into tResultA
+     if not cdb_result() then
+          put gCDBresultA["recent"]["response"]
+          exit cdb_updateTable
+     end if
+     
+     --REMOVE TEMPORARY DATA SERVER ACCESS
+     delete var gCSIconfigA["Client"]["a364ba8c-9e42-431b-bb72-3580296a4435"]
+     
+     --UPDATE LOCAL CONFIG FILE WITH NEW TABLE INFORMATION
+     put tInputA["devKeys"] into gCSIconfigA["Client"][tDevTeamID] [tInputA["tableName"]] ["devKeys"]
+     put tInputA["instanceName"] into gCSIconfigA["Client"][tDevTeamID] [tInputA["tableName"]] ["instanceName"]
+     put tInputA["tableDomain"] into gCSIconfigA["Client"][tDevTeamID] [tInputA["tableName"]] ["tableDomain"]
+     put gCSIindextableIDA[tInputA["tableName"]] into gCSIconfigA["Client"][tDevTeamID] [tInputA["tableName"]] ["tableID"]
+     put tInputA["teamID"] into gCSIconfigA["Client"][tDevTeamID] [tInputA["tableName"]] ["teamID"]
+     put tInputA["internalKeys"] into gCSIconfigA["Client"][tDevTeamID] [tInputA["tableName"]] ["internalKeys"]
+     
+     csi_saveConfig gCSIconfigA
+     csi_buildTeamDataA
+     csi_buildInternalIndexes
+     cdb_loadTable
+     
+     put "Your table has been updated:" && tInputA["tableName"]
+end cdb_updateTable
+
+
+function cdb_getSDK pInputA
+     local tArrayA, tErrorA, tInputA, tLinkedTableID, tRecordID
+     local tRecordsA, tRequiredList, tTableID, tTeamID, tUsersOutputA
+     
+     --REMOVE TEMPORARY VAR DATA
+     delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+     delete var gCSIteamDataA["a364ba8c-9e42-431b-bb72-3580296a4435"]
+     
+     --SET UP DEFAULT ERROR CHECKING
+     put "cdb_createTable" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     --VALIDATE INPUT
+     if pInputA is not an array then
+          put "pInputA is not an array." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     --CHECK EACH KEY OF INPUT
+     put "email,password" into tRequiredList
+     repeat for each key xKey in pInputA
+          switch
+               case itemOffset(xKey,tRequiredList) = 0
+                    break
+                    
+               case pInputA[xKey] is empty
+                    put "The following key:" && xKey && "is empty. Each key must have a value." into tErrorA["response"]
+                    csi_saveResult tErrorA
+                    
+                    --REMOVE TEMPORARY VAR DATA
+                    delete var gCSIteamDataA["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+                    return empty
+                    break
+          end switch
+     end repeat
+     
+     --TEMPORARILY SETUP ACCESS TO ACCOUNTS SERVER
+     csi_setupConfigForAccountsAccess
+     
+     --VERIFY CREDENTIALS WITH ACCOUNTING SERVER
+     put gCSIindexTableIDA["cdbAccountsUsers"] into tTableID
+     
+     --QUERY 1
+     put pInputA["email"] into tInputA["batchQuery"][tTableID][1]["value"]
+     put "email" into tInputA["batchQuery"][tTableID][1]["key"]
+     put "=" into tInputA["batchQuery"][tTableID][1]["operator"]
+     
+     --QUERY 2
+     put pInputA["password"] into tInputA["batchQuery"][tTableID][2]["value"]
+     put "password" into tInputA["batchQuery"][tTableID][2]["key"]
+     put "=" into tInputA["batchQuery"][tTableID][2]["operator"]
+     
+     --QUERY SETTINGS
+     put "logicalAND" into tInputA["settings"]["mode"]
+     put "recordData" into tInputA["settings"]["resultFormat"]
+     
+     put cdb_batchQueryCloud(tInputA) into tUsersOutputA
+     if not cdb_Result() then
+          --WE HAD A PROBLEM ACCESSING THE LIVECLOUD ACCOUNTS SERVER
+          put gCDBresultA["recent"]["response"]
+          return empty
+          exit cdb_getSDK
+     end if
+     
+     put keys of tUsersOutputA into tTeamID
+     if the num of elements of tUsersOutputA[tTeamID][1] = 0 then
+          --DEV HAS ENTERED IN BAD CREDENTIALS
+          put "Your account credentials may be incorrect. Please check your values and try again." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+          exit cdb_getSDK
+     end if
+     
+     --GET THE TABLE DATA FROM ACCOUNTS SERVER
+     put the keys of tUsersOutputA into tTableID
+     put the keys of tUsersOutputA[tTableID][1] into tRecordID
+     put tUsersOutputA[tTableID][1][tRecordID]["linkToTables"] into tLinkedTableID
+     
+     breakpoint --******
+     
+     put tLinkedTableID into tArrayA["cdbRecordID"]
+     put "clients" into tArrayA["cdbTableName"]
+     
+     put cdb_readCloud(tArrayA) into tRecordsA
+     if not cdb_result() then
+          put cdb_result("response") & lf after fld "data"
+          exit cdb_getSDK
+     end if
+end cdb_getSDK
+
+
+
+private command _____QUERIES
+end _____QUERIES
+function cdb_queryLocal pInputA
+     local tBatchQueryA, tErrorA
+     
+     if not csi_isUUID(pInputA["cdbTableName"]) then \
+           put gCSIindexTableIDA[pInputA["cdbTableName"]] into pInputA["cdbTableName"] //CONVERT FROM NAME TO ID IF IT'S NOT ALREADY AN ID
+     
+     //THE ID OR NAME PASSED ARE NOT A VALID TABLE
+     if not csi_IsValidTableID(pInputA["cdbTableName"]) then
+          put "The table queried cannot be found; please check the request and try again." into tErrorA["response"]
+          put false into tErrorA["completed"]
+          put "cdb_queryLocal" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     put pInputA["Query"] into tBatchQueryA["BatchQuery"][pInputA["cdbTableName"]][1]
+     
+     //THERE WAS A PROBLEM WITH THE WAY THE QUERY WAS CONSTRUCTED
+     if not _isValidBatchQueryA(tBatchQueryA["BatchQuery"]) then
+          put "There is a problem with the query's construction; please check the request and try again." into tErrorA["response"]
+          put false into tErrorA["completed"]
+          put "cdb_queryLocal" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     if pInputA["ResultFormat"] is empty then put "recordList" into pInputA["ResultFormat"]
+     put pInputA["ResultFormat"] into tBatchQueryA["Settings"]["ResultFormat"]
+     
+     put "true" into tBatchQueryA["Settings"]["collapseArray"]
+     
+     return cdb_batchQueryLocal(tBatchQueryA) //FORWARD THE CALL
+end cdb_queryLocal
+
+
+function cdb_queryCloud pInputA
+     local tBatchQueryA, tErrorA
+     
+     if not csi_isUUID(pInputA["cdbTableName"]) then \
+           put gCSIindexTableIDA[pInputA["cdbTableName"]] into pInputA["cdbTableName"] //CONVERT FROM NAME TO ID IF IT'S NOT ALREADY AN ID
+     
+     //THE ID OR NAME PASSED ARE NOT A VALID TABLE
+     if not csi_IsValidTableID(pInputA["cdbTableName"]) then
+          put "The table queried cannot be found; please check the request and try again." into tErrorA["response"]
+          put false into tErrorA["completed"]
+          put "cdb_queryCloud" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     put pInputA["Query"] into tBatchQueryA["BatchQuery"][pInputA["cdbTableName"]][1]
+     
+     //THERE WAS A PROBLEM WITH THE WAY THE QUERY WAS CONSTRUCTED
+     if not _isValidBatchQueryA(tBatchQueryA["BatchQuery"]) then
+          put "There is a problem with the query's construction; please check the request and try again." into tErrorA["response"]
+          put false into tErrorA["completed"]
+          put "cdb_queryCloud" into tErrorA["context"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     if pInputA["ResultFormat"] is empty then put "recordList" into pInputA["ResultFormat"]
+     put pInputA["ResultFormat"] into tBatchQueryA["Settings"]["ResultFormat"]
+     
+     put "true" into tBatchQueryA["Settings"]["collapseArray"]
+     
+     return cdb_batchQueryCloud(tBatchQueryA) //FORWARD THE CALL
+end cdb_queryCloud
+
+
+function cdb_batchQueryLocal pInputA
+     local tBatchQueryA, tDataA, tErrorA, tIsMatch, tRecordA, tResultsA
+     local tSettingsA
+     
+     put "cdb_batchQueryLocal" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     put pInputA["BatchQuery"] into tBatchQueryA
+     put pInputA["Settings"] into tSettingsA
+     
+     if tSettingsA["mode"] is not among the items of "logicalAND,logicalOR" then \
+           put empty into tSettingsA["mode"] //ONLY ALLOW CERTAIN RECOGNIZED MODES
+     
+     ##COMMENTING OUT THIS LINE BECAUSE IT PREVENTS DEVS FROM QUERYING A NEW TABLE OR EMPTY TABLE
+     --     if gCSIDatabaseA is empty then
+     --          put "Trying to do a cdb_batchQueryLocal. No tables have been loaded. Please load one or more tables before using cdb_batchQueryLocal." into tErrorA["response"]
+     --          csi_saveResult tErrorA
+     --          return empty
+     --     end if
+     
+     if not _isValidBatchQueryA(tBatchQueryA) then
+          put "There is a problem with one or more queries' construction; please check the request and try again." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     //LOOK IN EACH TABLE
+     repeat for each key xTableID in tBatchQueryA
+          if tSettingsA["mode"] = "" then
+               //PREP THE ARRAY TO RECEIVE RESULTS
+               put the keys of tBatchQueryA[xTableID] into tResultsA[xTableID]
+               split tResultsA[xTableID] with lf and comma
+          end if
+          
+          //LOOK IN EACH BRANCH
+          repeat for each key xBranch in gCSIDatabaseA[xTableID]
+               //LOOK IN EACH RECORD
+               repeat for each key xRecordID in gCSIDatabaseA[xTableID][xBranch]
+                    //EVALUATE EACH QUERY AGAINST THE CURRENT RECORD, DEPENDING ON WHETHER WE CAN OPTIMIZE OR NOT
+                    put gCSIDatabaseA[xTableID][xBranch][xRecordID] into tRecordA
+                    
+                    repeat for each key xQuery in tBatchQueryA[xTableID]
+                         put _checkQuery(tRecordA,tBatchQueryA[xTableID][xQuery]) into tIsMatch
+                         switch
+                              case tIsMatch and tSettingsA["mode"] = "logicalOR"
+                                   if tSettingsA["resultFormat"] is "recordData" then \
+                                         put tRecordA into tResultsA[xTableID][xRecordID] else \
+                                         put empty into tResultsA[xTableID][xRecordID] //RECORD THE MATCH COLLECTIVELY AND STOP LOOKING
+                                   exit repeat
+                                   break
+                              case not(tIsMatch) and tSettingsA["mode"] = "logicalAND"
+                                   delete variable tResultsA[xTableID][xRecordID] //PURGE EXISTING MATCHES AND STOP LOOKING
+                                   exit repeat
+                                   break
+                              case tIsMatch and tSettingsA["mode"] = "logicalAND"
+                                   if tSettingsA["resultFormat"] is "recordData" then \
+                                         put tRecordA into tResultsA[xTableID][xRecordID] else \
+                                         put empty into tResultsA[xTableID][xRecordID] //RECORD THE MATCH COLLECTIVELY BUT KEEP LOOKING
+                                   break
+                              case tIsMatch
+                                   if tSettingsA["resultFormat"] is "recordData" then \
+                                         put tRecordA into tResultsA[xTableID][xQuery][xRecordID] else \
+                                         put empty into tResultsA[xTableID][xQuery][xRecordID] //RECORD THE MATCH BY QUERY AND KEEP LOOKING
+                                   break
+                         end switch
+                    end repeat
+               end repeat
+          end repeat
+     end repeat
+     
+     //MASSAGE THE RESULTS INTO THE DESIRED FORMAT
+     switch tSettingsA["resultFormat"]
+          case "recordData"
+               //WE EXPLICTLY GATHER THE DATA AS WE GO IN THIS CASE, SO NO ADDTL WORK IS NEEDED
+               break
+          case "recordList"
+          default
+               //RETURN JUST THE UUIDS OF THE RECORDS THAT MATCHED
+               if tSettingsA["mode"] is empty then
+                    repeat for each key xTableID in tResultsA
+                         repeat for each key xQuery in tResultsA[xTableID]
+                              put the keys of tResultsA[xTableID][xQuery] into tResultsA[xTableID][xQuery]
+                         end repeat
+                    end repeat
+               else
+                    repeat for each key xTableID in tResultsA
+                         put the keys of tResultsA[xTableID] into tResultsA[xTableID]
+                    end repeat
+               end if
+               break
+     end switch
+     
+     //COLLAPSE THE ARRAY IF REQUESTED
+     if tSettingsA["collapseArray"] then
+          //IF THERE IS ONLY 1 QUERY
+          repeat for each key xTableID in tResultsA
+               if the num of elements of tResultsA[xTableID] = 1 then \
+                     put tResultsA[xTableID][line 1 of the keys of tResultsA[xTableID]] into tResultsA[xTableID]
+          end repeat
+          
+          //IF THERE IS ONLY 1 TABLE
+          if the num of elements of tResultsA = 1 then \
+                put tResultsA[line 1 of the keys of tResultsA] into tResultsA
+          get empty
+     else
+          if tSettingsA["mode"] is not empty then
+               //WE NEED TO 'EXPAND' THE ARRAY TO MATCH THE NON-COLLAPSED 'DISTINCT' OUTPUT FORMAT
+               repeat for each key xTableID in tResultsA
+                    put tResultsA[xTableID] into tDataA
+                    put empty into tResultsA[xTableID]
+                    put tDataA into tResultsA[xTableID][1]
+               end repeat
+          end if
+     end if
+     
+     put true into tErrorA["completed"]
+     csi_saveResult tErrorA
+     
+     return tResultsA
+end cdb_batchQueryLocal
+
+
+function cdb_batchQueryCloud pInputA
+     local tErrorA, tParametersA, tResultA, tServerResponseA, tTableID
+     local tTableResponseFolder, tTeamID
+     
+     put "cdb_BatchQueryCloud" into tErrorA["context"]
+     put false into tErrorA["completed"]
+     
+     //THIS IS A WORKAROUND FOR AN ISSUE WHEN BATCH CALLS ADDRESS TABLES ON DIFFERENT MACHINES @@@@@
+     //JUST PICK A TABLE ARBITRARILY AND USE THAT FOR NOW @@@@@
+     put gCSIindexTableNameA[line 1 of the keys of pInputA["BatchQuery"]] into tTableResponseFolder
+     put line 1 of the keys of pInputA["BatchQuery"] into tTableID
+     put gCSIindexTeamIDA[tTableID] into tTeamID
+     if tTableID or tTeamID is empty then
+          put "The required data found in your gCSIconfigA variable is missing. Please restart your SDK by restarting your app and try again." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     put "queryCloud" into tParametersA["requestType"]
+     put gCSIteamDataA[tTeamID][tTableResponseFolder]["instanceResponseFolder"] into tParametersA["instanceResponseFolder"]
+     put tTeamID into tParametersA["teamID"]
+     put tTableResponseFolder into tParametersA["tableName"]
+     
+     csi_sendPackageToServer pInputA,tParametersA,"ignore"
+     put the result into tResultA
+     
+     if tResultA["uploadStatus"] then
+          put csi_downloadServerResponse(tResultA["fileName"],tTableResponseFolder,tTeamID) into tServerResponseA
+          
+          if not cdb_Result() then
+               put "The server received your query, but did not respond in a timely manner." into tErrorA["response"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+          
+          put true into tErrorA["completed"]
+          csi_saveResult tErrorA
+          return tServerResponseA["response"]
+     else
+          put "The server could not be reached; please check your internet connection." into tErrorA["response"]
+          put false into tErrorA["completed"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+end cdb_batchQueryCloud
+
+
+private function _isValidBatchQueryA @rBatchQueryA
+     repeat for each key xTableID in rBatchQueryA
+          if xTableID is not among the keys of gCSIindexTableNameA then return false //VERIFY THAT ALL THE TABLES EXIST
+          
+          //CHECK INPUTS, VERIFY KEYS EXIST IN THE SCHEMA, MAKE SURE OPERATOR/KEY PAIRINGS ARE GOOD, ETC
+          repeat for each key xQueryID in rBatchQueryA[xTableID]
+               if _isValidQueryA(rBatchQueryA[xTableID][xQueryID], gCSIindexTableNameA[xTableID]) is not empty then return false
+          end repeat
+     end repeat
+     
+     return true
+end _isValidBatchQueryA
+
+
+private function _isValidQueryA @rQueryA, pTableName
+     local tSchema
+     
+     //CHECK FOR MISSING OR MISSPELLED KEYS
+     if "key" is not among the lines of the keys of rQueryA or \
+           "operator" is not among the lines of the keys of rQueryA or \
+           "value" is not among the lines of the keys of rQueryA then
+          return ("A provided query was missing required keys. Expected: key, operator, value / received:" && the keys of rQueryA)
+     end if
+     
+     //CONVERT OPERATOR INPUT TO STANDARDIZED FORM
+     put csi_convertQueryOperator(rQueryA["operator"]) into rQueryA["operator"]
+     if rQueryA["operator"] is empty then \
+           return ("The provided operator is missing or unrecognized.")
+     
+     //CHECK OPERATOR MISMATCHES FOR WHOLE-LINE QUERIES
+     if rQueryA["key"] is empty then
+          put "*" into rQueryA["key"]
+          if rQueryA["value"] is empty then \
+                return "Whole-record queries are incompatible with empty-value queries."
+          if rQueryA["operator"] is not "~" and rQueryA["operator"] is not "!~" then \
+                return ("The provided operator is not compatible with whole-record queries. Expected: ~ or !~ / Received: " & rQueryA["operator"])
+     end if
+     
+     //CHECK OPERATOR MISMATCHES FOR EMPTY-VALUE SEARCHES
+     if rQueryA["value"] is empty then
+          if rQueryA["operator"] is not "=" and rQueryA["operator"] is not "!=" then \
+                return ("The provided operator is not compatible with empty-value queries. Expected: = or != / Received: " & rQueryA["operator"])
+     end if
+     
+     //CHECK TYPING ERRORS
+     if (rQueryA["operator"] is among the items of "<,>,<=,>=") and rQueryA["value"] is not a number then \
+           return "The provided query uses a numeric-only operator with a non-numeric search value."
+     if (rQueryA["operator"] contains "date") then
+          convert rQueryA["value"] to dateItems
+          if not csi_IsDateItems(rQueryA["value"]) then \
+                return "The provided query uses a dateItems operator with a non-date search value."
+     end if
+     
+     //CHECK QUERY KEY AGAINST SCHEMA
+     put csi_getSchema("advanced",pTableName,cdb_getTeamID(pTableName)) into tSchema
+     put lf & "$" & lf & "*" after tSchema //SUPPORT OTHER NON-KEY KEYS
+     if rQueryA["key"] is not among the lines of tSchema then
+          return "The provided query is searching a key (" & rQueryA["key"] & \
+                ") which does not exist in this table (" & pTableName & ")."
+     end if
+     
+     return empty
+end _isValidQueryA
+
+
+private function _checkQuery pInputA, pQueryA
+     //WE ONLY NEED TO CHECK ONE SPECIFIC USER KEY, SIMPLE!
+     if pQueryA["key"] is not "*" and pQueryA["key"] is not "$" then \
+           return _checkValue(pInputA[pQueryA["key"]],pQueryA["value"],pQueryA["operator"])
+     
+     //IT'S A '$' OR '*' - FIRST WE CHECK THE USER'S KEYS ($)
+     repeat for each key xKey in pInputA
+          if xKey is "csi" or xKey is "cdb" then next repeat
+          if _checkValue(pInputA[xKey],pQueryA["value"],pQueryA["operator"]) then return true
+     end repeat
+     
+     //THEn WE CHECK THE INTERNAL KEYS AS WELL (*)
+     if pQueryA["key"] is "*" then
+          repeat for each key xKey in pInputA["cdb"]
+               if _checkValue(pInputA["cdb"][xKey],pQueryA["value"],pQueryA["operator"]) then return true
+          end repeat
+     end if
+     
+     return false //WE DIDN'T FIND IT IN ANY OF THE KEYS WE SCANNED
+end _checkQuery
+
+
+private function _checkValue pLookIn, pLookFor, pOperator
+     //THIS IS THE HANDLER THAT ACTUALLY PROCESSES THE QUERY OPERATOR
+     switch pOperator
+          case "~"
+               set the wholeMatches to false
+               return (lineOffset(pLookFor,pLookIn) <> 0)
+               break
+          case "!~"
+               set the wholeMatches to false
+               return (lineOffset(pLookFor,pLookIn) = 0)
+               break
+          case "["
+               return (char 1 to (the num of chars of pLookFor) of pLookIn = pLookFor)
+               break
+          case "]"
+               return (char (the num of chars of pLookFor)/-1 to -1 of pLookIn = pLookFor)
+               break
+          case "="
+               if pLookFor is empty then return (pLookIn is empty)
+               set the wholeMatches to true
+               return (lineOffset(pLookFor,pLookIn) <> 0)
+               break
+          case "!="
+               if pLookFor is empty then return not(pLookIn is empty)
+               set the wholeMatches to true
+               return (lineOffset(pLookFor,pLookIn) = 0)
+               break
+          case ">"
+               return (pLookIn > pLookFor)
+               break
+          case ">="
+               return (pLookIn >= pLookFor)
+               break
+          case "<"
+               return (pLookIn < pLookFor)
+               break
+          case "<="
+               return (pLookIn <= pLookFor)
+               break
+          case "filter"
+               filter pLookIn with pLookFor
+               return (pLookIn is not empty)
+               break
+          case "regex"
+               return matchText(pLookIn,pLookFor)
+               break
+          case "date>"
+          case "date<"
+          case "date<="
+          case "date>="
+          case "date="
+          case "date!="
+               return csi_DateItemsCompare(pLookIn, pLookFor, char 5 to -1 of pOperator)
+               break
+     end switch
+     return empty //OPERATOR NOT UNDERSTOOD
+end _checkValue
+
+
+
+private command _____ERROR_CHECKING
+end _____ERROR_CHECKING
+function cdb_result pParam
+     local tResult
+     
+     put csi_result(pParam) into tResult
+     return tResult
+end cdb_result
+
+
+command cdb_setLogMode pInput
+     put pInput into gCDBresultA["errorOutput"]
+end cdb_setLogMode
+
+
+
+private function _____CONFIG
+end _____CONFIG
+private function csi_importConfig
+     local tConfigA
+     
+     put url ("file:" & csi_directoryPreferences() & "config") into tConfigA
+     
+     if "authKey" is not in tConfigA then
+          try
+               --CONFIG HAVE BEEN SAVED ENCRYPTED
+               put csi_decrypt(base64Decode(tConfigA),"CSIconfig") into tConfigA
+          catch tError
+               answer "There was a problem accessing config data file. Either the file is missing or you are unable to " & \
+                     "decrypt due to not including the encryption feature in LiveCode Standalone Builder." & lf & line -2 of the executionContexts with "OK"
+          end try
+     end if
+     
+     return csi_jsonToArray(tConfigA)
+end csi_importConfig
+
+
+private function csi_jsonToArray pJson
+     local tArrayA
+     
+     repeat for each line xKey in mergJSONdecode(pJSON,"tArrayA")
+          put csi_jsonToArray(tArrayA[xKey]) into tArrayA[xKey]
+     end repeat
+     
+     return tArrayA
+end csi_jsonToArray
+
+
+private command csi_saveConfig pConfigA
+     --SOMETIMES HANDLERS WILL NOT WANT THE CONFIG VALUES TO BE RELOADED
+     --THEY HAVE SET NEW VALUES AND EXPECT THEM TO BE SAVED
+     if pConfigA is empty then put csi_importConfig() into pConfigA
+     
+     --REMOVE TEMPORARY DATA
+     delete var pConfigA["CassiaDB"]["tablesLoaded"]
+     
+     --CONVERT ARRAY TO JSON
+     put csi_ArrayToJSONsecure(pConfigA) into pConfigA
+     --     put base64Encode(csi_Encrypt(pConfigA,"CSIconfig")) into pConfigA
+     put pConfigA into url ("file:" & csi_DirectoryPreferences() & "config")
+     delete var pConfigA
+     
+     --REBUILD pConfigA["tablesLoaded"]
+     repeat for each key xTableID in gCSIdatabaseA
+          --LOOK UP tableName IN INDEX
+          put true into gCSIconfigA["CassiaDB"]["tablesLoaded"][gCSIindexTableNameA[xTableID]]
+     end repeat
+end csi_saveConfig
+
+
+
+private function _____ENCRYPTION
+end _____ENCRYPTION
+private function csi_encrypt pData, pType
+     switch pType
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               encrypt compress(pData) using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB AND LIVECLOUD
+               encrypt compress(pData) using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               encrypt compress(pData) using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CDBblob"
+               encrypt pData using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is not empty then return empty
+               return base64Encode(it)
+               break
+               
+          case "CDBdoc"
+               encrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_encrypt
+
+
+private function csi_decrypt pData, pType
+     switch pType
+          
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               decrypt pData using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB AND LIVECLOUD
+               decrypt pData using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               decrypt pData using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "liveEventsBlob"
+               local tCipher,bitcount,tkey,tParamA
+               
+               put "?unep8aye8r546as_ubE*uqa?ruducra" into tkey
+               
+               put base64Decode(pData) into pData
+               
+               put "aes256" into tCipher
+               put 256 into bitcount
+               
+               try
+                    decrypt pData using tcipher with tkey at bitcount bit
+               catch tError
+                    return "error with encryption"
+               end try
+               
+               if the result is not empty then return empty else return it
+               break
+               
+          case "CDBblob"
+               decrypt base64Decode(pData) using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is empty then return it
+               break
+               
+          case "CDBdoc"
+               decrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_decrypt
+
+
+private function csi_MD5 pValue
+     local tRes
+     
+     get binaryDecode("H*",md5Digest("canela" && pValue),tRes)
+     return tRes
+end csi_MD5

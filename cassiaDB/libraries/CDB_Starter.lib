@@ -1,0 +1,620 @@
+﻿script "CDB_Starter.lib"
+//>GLOBALS
+global gCachedProcessedFileNames, gCDBAuthKey, gCSIconfigA, gCSIdatabaseA
+global gCSIindexTableNameA, gDebugModeOn
+
+
+on libraryStack
+     csi_debugOutput "...Loading:" && the short name of this stack
+
+     if the long name of me is not in the long name of the target then pass libraryStack
+     
+     csi_loadLibraries
+     csi_loadConfig
+     csi_saveConfig gCSIconfigA
+     csi_buildTeamDataA
+     csi_buildInternalIndexes
+     
+     set the allowInterrupts to true
+end libraryStack
+
+
+
+private function _____LIBRARIES
+end _____LIBRARIES
+command csi_loadLibraries
+     local tLibraryList
+     
+     --AUTHENTICATE USAGE OF APIS
+     get csi_checkAuthentication()
+     
+     --GET LIST OF LIBRARIES
+     set the directory to csi_DirectoryLibraries()
+     put the files into tLibraryList
+     
+     --filter tLibraryList without "CDB_Starter.lib"
+     filter tLibraryList without ".*"
+     filter tLibraryList without "*.gz"
+     filter tLibraryList without "*.zip"
+     filter tLibraryList without empty
+     filter tLibraryList without "cdb_starter.lib"
+     
+     --      --DELETE LIBRARIES THAT ARE NO LONGER NEEDED
+     --      if csi_checkGodMode() is empty and gCSIconfigA["Server"]["mainStack"] is not in the mainstacks then
+     --           put 1 into tCount
+     --           repeat for each line xLib in tLibraryList
+     --                if xLib is not in kCassiaDBLibraries then
+     --                     delete file xLib
+     --                else
+     --                     --BUILD UPDATED LIST OF GOOD LIBRARIES
+     --                     put xLib & lf after tUpdatedLibraryList
+     --                end if
+     --                add 1 to tCount
+     --           end repeat
+     --           put tUpdatedLibraryList into tLibraryList
+     --      end if
+     
+     
+     --LOAD MAINSTACKS
+     repeat for each line xMainStack in tLibraryList
+          start using stack (csi_DirectoryLibraries() & xMainStack)
+          try
+               if csi_checkGodMode() is not empty then set the passkey of stack xMainStack to csi_checkGodMode()
+          end try
+     end repeat
+     
+     --THIS MUST BE EXECUTED HERE TO ALLOW ALL LIBRARIES TO LOAD
+     --YOU MAY BE TEMPTED TO MOVE IT UP, BUT THAT WILL CAUSE YOU SEVERE PAIN
+     delete var gCDBauthKey
+end csi_loadLibraries
+
+
+command csi_unloadLibraries
+     local tLibraryList
+     
+     set the directory to csi_DirectoryLibraries()
+     put the files into tLibraryList
+     filter tLibraryList without ".*"
+     filter tLibraryList without "cdb_starter.lib"
+     replace lf with comma in tLibraryList
+     replace ".lib" with empty in tLibraryList
+     
+     repeat for each item xLibrary in tLibraryList
+          try
+               stop using stack xLibrary
+          end try
+     end repeat
+     
+     send "closeCDBstarter" to me in 50 milliseconds
+end csi_unloadLibraries
+
+
+command closeCDBstarter
+     try
+          stop using stack "CDB_Starter.lib"
+          delete stack "CDB_Starter.lib"
+     end try
+end closeCDBstarter
+
+
+
+private function _____AUTHENTICATION
+end _____AUTHENTICATION
+private function csi_checkGodMode
+     local tPasskey
+     
+     put empty into tPasskey
+     
+     if exists(stack "dev tools") and the environment is "development" then
+          dispatch function "fetchSecureInfo" to stack "dev tools" with "passkey","CassiaStack"
+          put the result into tPasskey
+     end if
+     
+     if tPasskey is not empty then return tPasskey else return empty
+end csi_checkGodMode
+
+
+function csi_checkAuthentication
+     local tAuthKey, tConfigA
+     
+     set the allowInterrupts to false
+     put csi_importConfig() into tConfigA
+     put tConfigA["CassiaDB"]["authKey"] into tAuthKey
+     delete var tConfigA
+     
+     if tAuthKey = gCDBAuthKey then
+          delete var tAuthKey
+          return true
+     else
+          --DEV USE ONLY
+          if csi_checkGodMode() is not empty then
+               answer "Auth key mismatch, allow dev in" with "OK"
+               return true
+          end if
+          
+          delete var gCDBauthKey
+          csi_unloadLibraries
+          
+          answer "Auth key mismatch" with "OK"
+          exit to top
+     end if
+end csi_checkAuthentication
+
+
+
+private function _____DIRECTORY_MANAGEMENT
+end _____DIRECTORY_MANAGEMENT
+function csi_getSingleDirectory
+     local tFiles, tPath
+     
+     if not exists(csi_directoryServerSingleRequests()) then
+          put csi_directoryServerSingleRequests() into tPath
+          set the itemDel to slash
+          delete item -1 of tPath
+          create folder tPath
+          put "single/" after tPath
+          create folder tPath
+     end if
+     
+     set the directory to csi_directoryServerSingleRequests()
+     
+     put the files into tFiles
+     filter tFiles without ".*" --REMOVE INVISIBLES
+     
+     --REMOVE FILES THAT ARE IN OUR CACHE
+     put csi_CompareDifferenceInVariablesByLines(tFiles,gCachedProcessedFileNames) into tFiles
+     
+     set the itemDel to "_"
+     sort tFiles by item 5 of each
+     return tFiles
+end csi_getSingleDirectory
+
+
+command csi_getMultiDirectory pMinionCommPath,pMinionNumber
+     local tFileName, tFiles, tHoldPackageDataA, tPath, tReconstitutedFileA
+     local tSortA, tSortList, tTotalCount
+     
+     if not exists(csi_directoryServerSingleRequests()) then
+          put csi_directoryServerMultiRequests() into tPath
+          set the itemDel to slash
+          delete item -1 of tPath
+          create folder tPath
+          put "multi/" after tPath
+          create folder tPath
+     end if
+     
+     set the directory to csi_directoryServerMultiRequests()
+     
+     put the files into tFiles
+     filter tFiles without ".*" --REMOVE INVISIBLES
+     
+     --BUILD AN ARRAY REPRESENTING THE FILES TO BE STITCHED TOGETHER
+     set the itemDel to "_"
+     repeat for each line xSlice in tFiles
+          put xSlice into tSortA[item 1 of xSlice][item 3 of xSlice]
+     end repeat
+     
+     --CHECK EACH TRANSACTION ID FOR COMPLETENESS
+     repeat for each key xKey in tSortA
+          put the num of elements of tSortA[xKey] into tTotalCount
+          set the itemDel to "-"
+          if tTotalCount <> the last item of line 1 of the keys of tSortA[xKey] then
+               delete var tSortA[xKey]
+          end if
+     end repeat
+     
+     --THE REMAINING tSortA ARRAY CONTAINS A COMPLETE LIST OF SLICES TO BE RECONSTITUTED
+     repeat for each key xTransactionID in tSortA
+          put the keys of tSortA[xTransactionID] into tSortList
+          sort lines of tSortList ascending numeric by item 1 of each
+          
+          --RECONSITUTE THE FILES
+          set the itemDel to "-"
+          put empty into tReconstitutedFileA
+          
+          repeat for each line xSlice in tSortList
+               put url ("file:" & tSortA[xTransactionID][xSlice]) after tReconstitutedFileA
+               put base64Decode(tReconstitutedFileA) into tReconstitutedFileA
+               put csi_Decrypt(tReconstitutedFileA,"CSIcomms") into tReconstitutedFileA
+               put arrayDecode(tReconstitutedFileA) into tReconstitutedFileA
+               
+               --SAVE PACKAGE DATA FOR REASSEMPLY AFTER THIS REPEAT IS OVER
+               put tReconstitutedFileA["package"] after tHoldPackageDataA
+          end repeat
+          
+          --BRING BACK PACKAGE CONTENT
+          put tHoldPackageDataA into tReconstitutedFileA["package"]
+          delete var tHoldPackageDataA
+          
+          --BUILD FILENAME
+          put the UUID() & "_" & tReconstitutedFileA["teamID"] & "_" & tReconstitutedFileA["requestType"] & "_" & csi_longMilliseconds() into tFileName
+          
+          --FLATTEN ARRAY FOR TRANSPORT
+          put arrayEncode(tReconstitutedFileA) into tReconstitutedFileA
+          put base64Encode(csi_Encrypt(tReconstitutedFileA,"CSIcomms")) into tReconstitutedFileA
+          
+          --SEND FILE TO SINGLE FOLDER
+          put tReconstitutedFileA into URL ("file:" & csi_directoryServerSingleRequests() & tFileName)
+          
+          --CLEAN UP THE MULTI FOLDER
+          repeat for each line xSlice in tSortList
+               delete file tSortA[xTransactionID][xSlice]
+          end repeat
+     end repeat
+end csi_getMultiDirectory
+
+
+function csi_directoryLocalResponses
+     if gCSIconfigA["Server"]["localDirectory"] is empty then return "error: config file missing"
+     return (gCSIconfigA["Server"]["localDirectory"] & "response/")
+end csi_directoryLocalResponses
+
+
+function csi_directoryServerSingleRequests
+     if gCSIconfigA["Server"]["localDirectory"] is empty then return "error: config file missing"
+     return (gCSIconfigA["Server"]["localDirectory"] & "request/" & gCSIconfigA["Server"]["instanceName"] & "/single/")
+end csi_directoryServerSingleRequests
+
+
+function csi_directoryServerMultiRequests
+     if gCSIconfigA["Server"]["localDirectory"] is empty then return "error: config file missing"
+     return (gCSIconfigA["Server"]["localDirectory"] & "request/" & gCSIconfigA["Server"]["instanceName"] & "/multi/")
+end csi_directoryServerMultiRequests
+
+
+function csi_directoryDesktop
+     return specialFolderPath("desktop")
+end csi_directoryDesktop
+
+
+function csi_directoryLibraries
+     return (csi_DirectoryCassiaDB() & "libraries/")
+end csi_directoryLibraries
+
+
+function csi_directoryPreferences
+     return (csi_DirectoryCassiaDB() & "preferences/")
+end csi_directoryPreferences
+
+
+function csi_directoryTable pTableID
+     local tErrorA, tPath, tTableIDfolder
+     
+     if pTableID is empty then
+          put false into tErrorA["completed"]
+          put "csi_directoryTable" into tErrorA["context"]
+          put "Missing pTableName or pTeamID value in csi_directoryTable call." into tErrorA["response"]
+          csi_saveResult tErrorA
+          exit csi_directoryTable
+     end if
+     
+     put (csi_DirectoryCassiaDB() & "database/" & pTableID & slash) into tTableIDfolder
+     
+     if there is a folder tTableIDfolder then return tTableIDfolder
+     
+     --FOLDERS DONT EXIST YET, CREATE THEM AS NEEDED
+     set the itemDel to slash
+     repeat for each item thisItem in tTableIDfolder
+          put thisItem & "/" after tPath
+          if there is not a folder tPath then create folder tPath
+     end repeat
+     
+     return tTableIDfolder
+end csi_directoryTable
+
+
+function csi_directoryLicenseCodes pVersion
+     return (csi_DirectoryCassiaDB() & "licenseCodes/" & pVersion & "/")
+end csi_directoryLicenseCodes
+
+
+function csi_directoryApplication
+     set the itemdel to slash
+     if gCSIconfigA["Server"]["mainStack"] is empty then return "error: config file missing"
+     return (item 1 to -2 of the effective filename of stack gCSIconfigA["Server"]["mainStack"]) & slash
+end csi_directoryApplication
+
+
+function csi_directoryAppFolder
+     local tPath
+     
+     if the environment is "development" then return csi_DirectoryApplication()
+     set the itemdel to slash
+     put the effective filename of stack gCSIconfigA["Server"]["mainStack"] into tPath
+     if the platform is "macos" then delete item -4 to -1 of tPath
+     if the platform is "win32" or the platform is "linux" then delete the last item of tPath
+     return tPath & slash
+end csi_directoryAppFolder
+
+
+function csi_directoryCassiaDB
+     --MOBILE
+     if the environment is "mobile" then
+          return specialFolderPath("cache") & slash
+     else
+          --DESKTOP
+          set the itemDel to slash
+          return item 1 to -3 of (the effective filename of stack "CDB_Starter.lib") & slash
+     end if
+end csi_directoryCassiaDB
+
+
+
+private function _____DEBUGGING_TOOLS
+end _____DEBUGGING_TOOLS
+command csi_debugOutput pMessage
+     local tChar, tCounter, tDoc, tFileSize, tLogPath
+     
+     put true into gDebugModeOn
+     
+     --MAKE SURE gCSIconfigA["Server"]["serverDebugLog"] HAS A VALUE
+     if gCSIconfigA["Server"]["serverDebugLog"] is empty then put "Server Debug Log.txt" into gCSIconfigA["Server"]["serverDebugLog"]
+     
+     --MAKE SURE DIRECTORY EXISTS
+     set the directory to csi_directoryAppFolder()
+     if there is a folder "server logs" is false then create folder "server logs"
+     
+     --BUILD LOG PATH
+     put ("file:" & "server logs" & slash & gCSIconfigA["Server"]["serverDebugLog"]) into tLogPath
+     
+     --CHECK FILE SIZE
+     put URL ("file:" & tLogPath) into tDoc
+     put the num of chars of tDoc into tFileSize
+     csi_cleanServerLogs tFileSize,tLogPath
+     
+     --WRITE OUT LOG
+     if gDebugModeOn is true then
+          if char 5 of pMessage = "#" then put (lf & lf & lf) before pMessage --PREPEND MAJOR SECTIONS WITH LF*3
+          put 0 into tCounter
+          repeat (the num of chars of pMessage)
+               add 1 to tCounter
+               put char tCounter of pMessage into tChar
+               if tChar is not lf and tChar is not cr and tChar is not lf then
+                    put csi_verboseTime() & "  " before char tCounter of pMessage --PUT THE TIMESTAMP AFTER THE SPACES, AND BEFORE THE CONTENT
+                    exit repeat
+               end if
+          end repeat
+          
+          put (pMessage & lf) after URL ("file:" & tLogPath) --WRITE TO THE LOG
+     end if
+end csi_debugOutput
+
+
+function csi_verboseTime
+     --YYYY-MM-DD HH:MM:SS.### (ISO 8601)
+     set the numberFormat to "00."
+     set the itemdel to "/"
+     return ((word 4 of the internet english date & "-" & (item 1 of the short english date)+0 & "-" & (item 2 of the short english date)+0 && \
+           word 5 of the internet english date & "." & char -3 to -1 of the milliseconds))
+end csi_verboseTime
+
+
+command csi_cleanServerLogs pFileSize,pLogPath
+     local tStamp
+     
+     if pFileSize > 1000000 then
+          put the internet english date into tStamp
+          replace ":" with "." in tStamp --OS DOES NOT LIKE COLONS IN FILE NAME
+          rename file pLogPath to (pLogPath && tStamp)
+     end if
+end csi_cleanServerLogs
+
+
+function csi_longSeconds
+     local tFoundChar, tPrecisionDiff, tTime
+     
+     put the long milliseconds into tTime
+     put offset(".",tTime) into tFoundChar
+     delete char tFoundChar of tTime
+     put "." before char tFoundChar-3 of tTime
+     
+     set the itemDel to "."
+     put 9 - the num of chars of item 2 of tTime into tPrecisionDiff
+     repeat tPrecisionDiff
+          put "0" after tTime
+     end repeat
+     
+     return tTime
+end csi_longSeconds
+
+
+
+private function _____PENDING_MESSAGES
+end _____PENDING_MESSAGES
+command csi_cancelPendingMessages pMessage
+     local tCancelPendingMessage, tLine, tPendingMessages, tPendingMessagesCount
+     
+     put the pendingMessages into tPendingMessages
+     put the number of lines of tPendingMessages into tPendingMessagesCount
+     
+     put 0 into tLine
+     repeat tPendingMessagesCount
+          add 1 to tLine
+          if item 3 of line tLine of tPendingMessages = pMessage or pMessage = "All" then
+               put item 1 of line tLine of tPendingMessages into tCancelPendingMessage
+               cancel tCancelPendingMessage
+          end if
+     end repeat
+end csi_cancelPendingMessages
+
+
+
+private function _____CONFIG
+end _____CONFIG
+command csi_loadConfig
+     ##csi_loadConfig IS NOT PRIVATIZED
+     ##CAN BE LOADED FROM ANYWHERE
+     
+     delete var gCSIconfigA
+     
+     put csi_importConfig() into gCSIconfigA
+     put the short name of the topStack into gCSIconfigA["Server"]["mainStack"]
+     
+     put "CassiaDBLog.txt" into gCSIconfigA["Server"]["serverLog"]
+end csi_loadConfig
+
+
+private function csi_importConfig
+     local tConfigA
+     
+     put url ("file:" & csi_DirectoryPreferences() & "config") into tConfigA
+     
+     if "authKey" is not in tConfigA then
+          try
+               --CONFIG HAVE BEEN SAVED ENCRYPTED
+               put csi_decrypt(base64Decode(tConfigA),"CSIconfig") into tConfigA
+          catch tError
+               answer "There was a problem accessing config data file. Either the file is missing or you are unable to " & \
+                     "decrypt due to not including the encryption feature in LiveCode Standalone Builder." & lf & line -2 of the executionContexts with "OK"
+          end try
+     end if
+     
+     return csi_jsonToArray(tConfigA)
+end csi_importConfig
+
+
+private function csi_jsonToArray pJson
+     local tArrayA
+     
+     if pJson is empty then return empty
+     
+     repeat for each line xKey in mergJSONdecode(pJSON,"tArrayA")
+          put csi_jsonToArray(tArrayA[xKey]) into tArrayA[xKey]
+     end repeat
+     
+     return tArrayA
+end csi_jsonToArray
+
+
+private command csi_saveConfig pConfigA
+     --SOMETIMES HANDLERS WILL NOT WANT THE CONFIG VALUES TO BE RELOADED
+     --THEY HAVE SET NEW VALUES AND EXPECT THEM TO BE SAVED
+     if pConfigA is empty then put csi_importConfig() into pConfigA
+     
+     --REMOVE TEMPORARY DATA
+     delete var pConfigA["CassiaDB"]["tablesLoaded"]
+     
+     --CONVERT ARRAY TO JSON
+     put csi_ArrayToJSONsecure(pConfigA) into pConfigA
+     put base64Encode(csi_Encrypt(pConfigA,"CSIconfig")) into pConfigA
+     put pConfigA into url ("file:" & csi_DirectoryPreferences() & "config")
+     delete var pConfigA
+     
+     --REBUILD pConfigA["tablesLoaded"]
+     repeat for each key xTableID in gCSIdatabaseA
+          --LOOK UP tableName IN INDEX
+          put true into gCSIconfigA["CassiaDB"]["tablesLoaded"][gCSIindexTableNameA[xTableID]]
+     end repeat
+end csi_saveConfig
+
+
+
+private function _____ENCRYPTION
+end _____ENCRYPTION
+function csi_encryptem pData, pType
+     --@@@@@
+     --THIS CUSTOM VERSION OF ENCRYPT IS ONLY USED WITH THE 'BASIC TESTS' STACK THAT WE HAND OUT TO DEVS
+     switch pType
+          case "CSIconfig"
+               --NOT IN USE YET
+               encrypt compress(pData) using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is not empty then return empty
+               return it
+               break
+     end switch
+end csi_encryptem
+
+
+private function csi_encrypt pData, pType
+     switch pType
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               encrypt compress(pData) using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB
+               encrypt compress(pData) using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               encrypt compress(pData) using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CDBblob"
+               encrypt pData using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is not empty then return empty
+               return base64Encode(it)
+               break
+               
+          case "CDBdoc"
+               encrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_encrypt
+
+
+private function csi_decrypt pData, pType
+     switch pType
+          
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               decrypt pData using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB
+               decrypt pData using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               decrypt pData using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CDBblob"
+               decrypt base64Decode(pData) using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is empty then return it
+               break
+               
+          case "CDBdoc"
+               decrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_decrypt
+
+
+private function csi_MD5 pValue
+     local tRes
+     
+     get binaryDecode("H*",md5Digest("canela" && pValue),tRes)
+     return tRes
+end csi_MD5

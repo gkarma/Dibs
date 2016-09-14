@@ -1,0 +1,357 @@
+﻿script "CSI_Networking.lib"
+//>GLOBALS
+global gCSIconfigA, gCSInewRequestA, gCSIteamDataA, gMinionsA
+
+//>CONSTANTS
+constant kSocketTimeoutValue = 7000
+
+
+on libraryStack
+     csi_debugOutput "...Loading:" && the short name of this stack
+     
+     if the long name of me is not in the long name of the target then pass libraryStack
+     if ("CDB_Starter.lib" is not in the stacksInUse) or not(csi_checkAuthentication()) then
+          --UNAUTHORIZED ENTRY
+          stop using me
+          exit to top
+     end if
+end libraryStack
+
+
+
+private function _____DOWNLOAD
+end _____DOWNLOAD
+function csi_downloadServerResponse pFileName,pTableName,pTeamID
+     local tCounter, tDatabaseDomain, tDownloadedTransactionA
+     local tMyURL, tResponseFolder, tResult, tResultA
+     
+     --THIS FUNCTION IS USED BY A CLIENT
+     --THUS IT HAS NOT BEEN MINIONIZED YET
+     
+     set the socketTimeoutInterval to kSocketTimeoutValue
+     put empty into tDownloadedTransactionA
+     put 1 into tCounter
+     
+     
+     put gCSIteamDataA[pTeamID][pTableName]["tableDomain"] into tDatabaseDomain
+     put gCSIteamDataA[pTeamID][pTableName]["instanceResponseFolder"] into tResponseFolder
+     
+     put "http://" & tDatabaseDomain & "/communication/response/" & tResponseFolder & "/" & pFileName & "?x=" & the seconds into tMyURL
+     
+     repeat forever
+          put URL (tMyURL) into tDownloadedTransactionA
+          put the result into tResult
+          
+          if tDownloadedTransactionA is not empty and "<HTML" is not in tDownloadedTransactionA then
+               try
+                    put arrayDecode(csi_decrypt(base64Decode(tDownloadedTransactionA),"CSIcomms")) into tDownloadedTransactionA
+               end try
+               
+               if "EOF" is in the keys of tDownloadedTransactionA then exit repeat
+          end if
+          
+          switch
+               --WE SAW A SOCKET TIMEOUT, JUST GIVE UP
+               --OR, WE HAVE EXCEEDED MAXIMUM TRIES
+               case tResult is "error socket timeout"
+               case tCounter > 1500
+                    put false into tResultA["completed"]
+                    put "csi_downloadServerResponse" into tResultA["context"]
+                    put "The server response could not be downloaded at this time." into tResultA["response"]
+                    csi_saveResult tResultA
+                    
+                    return tResultA
+                    break
+                    
+                    --WE DID NOT GET IT, TRY AGAIN
+               case tCounter <= 1500
+                    wait 2 milliseconds
+                    add 1 to tCounter
+                    break
+          end switch
+     end repeat
+     
+     put true into tResultA["completed"]
+     put "csi_downloadServerResponse" into tResultA["context"]
+     csi_saveResult tResultA
+     
+     return tDownloadedTransactionA
+end csi_downloadServerResponse
+
+
+
+private function _____UPLOAD
+end _____UPLOAD
+function csi_HTTPuploadHyperBlob pBlob,pFileName,pAction,pTableName,pTeamID
+     local tData, tLink, tObjectName, tResponse, tResult, tResultA
+     
+     set the socketTimeoutInterval to kSocketTimeoutValue
+     
+     put "http://" & gCSIteamDataA[pTeamID][pTableName]["tableDomain"] & "/hyperblob/" into tLink
+     
+     put urlencode(pBlob) into pBlob
+     put urlencode(pAction) into pAction
+     put urlencode(pFileName) into tObjectName
+     
+     put "action=" & pAction into tData
+     put "&objectname=" & tObjectName after tData
+     put "&csdata=" & pBlob after tData
+     
+     --UPLOAD THE REQUEST
+     repeat 2
+          post tData to URL tLink
+          put it into tResponse
+          put the result into tResult
+          
+          if tResult is empty then exit repeat --SUCCESSFUL UPLOAD
+          if "Previous request not completed" is in tResult then
+               wait 30 ticks
+               next repeat
+          end if
+     end repeat
+     
+     if "success" is in tResponse then
+          put "csi_HTTPuploadHyperBlob" into tResultA["context"]
+          put true into tResultA["completed"]
+     else
+          put false into tResultA["completed"]
+          put "csi_HTTPuploadHyperBlob" into tResultA["context"]
+          if "Previous request not completed" is in tResult then \
+                put "Previous request not completed." into tResultA["response"] else \
+                put "Error uploading hyper-blob to server." into tResultA["response"]
+     end if
+     
+     csi_saveResult tResultA
+     return tResultA
+end csi_HTTPuploadHyperBlob
+
+
+function csi_HTTPuploadRequestSwitch @rMessage,@rDeliverableA --, rMessage,pFilename,pTableName,pTeamID,pType
+     local tPackage
+     
+     --pType = multi or single (default if empty)
+     
+     if rDeliverableA["type"] is empty then put "single" into rDeliverableA["type"]
+     
+     switch gMinionsA["running"]
+          case true
+               --SEND DATA TO MINIONS
+               BREAKPOINT --*******
+               put "csi_HTTPuploadRequest",rMessage,rDeliverableA into tPackage
+               csi_FeedMinions tPackage,gMinionsA["path"],gMinionsA["maxCount"]
+               return true
+               break
+               
+          default
+               get csi_HTTPuploadRequest(rMessage,rDeliverableA)
+               
+               if it is true then
+                    --UPLOAD SUCCEEDED
+                    return true
+               else
+                    return it
+               end if
+               break
+     end switch
+end csi_HTTPuploadRequestSwitch
+
+
+function csi_HTTPuploadRequest @rMessage,@rDeliverableA
+     local tAPIversionFolder, tCounter, tData, tLink
+     local tResponse, tResult, tResultA, tTableDomain
+     
+     put "csi_HTTPuploadRequest" into tResultA["context"]
+          
+     set the socketTimeoutInterval to kSocketTimeoutValue
+     put gCSIteamDataA [rDeliverableA["teamID"]] [rDeliverableA["tableName"]] ["tableDomain"] into tTableDomain
+     put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["clientAPIVersion"]),"transportDetails") into tAPIversionFolder
+     put "http://" & tTableDomain & "/version_" & tAPIversionFolder & "/request.php" into tLink
+     
+     put "csMessage=" & urlencode(rMessage) into tData
+     put "&csFileName=" & urlencode(rDeliverableA["fileName"]) after tData
+     put "&csInstanceRequestFolder=" & urlencode(gCSIteamDataA[rDeliverableA["teamID"]] [rDeliverableA["tableName"]] ["instanceRequestFolder"]) after tData
+     put "&csLandingFolder=" & urlencode(rDeliverableA["type"]) after tData
+     
+     --UPLOAD THE REQUEST
+     put 1 into tCounter
+     repeat
+          post tData to URL tLink
+          put it into tResponse
+          put the result into tResult
+          
+          if tResult is empty then exit repeat --SUCCESSFUL UPLOAD
+          if tCounter > 2 then
+               --THE UPLOAD FAILED, RETURN ERROR
+               put tResult into tResultA["response"]
+               exit repeat
+          end if
+          
+          if "Previous request not completed" is in tResult then
+               wait 300 milliseconds
+               next repeat
+          end if
+          
+          add 1 to tCounter
+     end repeat
+     
+     if "TRUE" is in tResponse then
+          put true into tResultA["completed"]
+          csi_saveResult tResultA
+     else
+          put false into tResultA["completed"]
+          if "Previous request not completed" is in tResult then \
+                put "Previous request not completed." into tResultA["response"]
+          csi_saveResult tResultA
+     end if
+     
+     return tResultA["completed"]
+end csi_HTTPuploadRequest
+
+
+
+private function _____DELETE
+end _____DELETE
+command csi_deleteRequest
+     local tFileName, tPackage, tResult
+     
+     put gCSInewRequestA["requestFileName"] into tFileName
+     
+     switch gMinionsA["running"]
+          case true
+               --SEND DATA TO MINIONS
+               put "csi_deleteRequest",tFileName into tPackage
+               csi_FeedMinions tPackage,gMinionsA["path"],gMinionsA["maxCount"]
+               return true
+               break
+               
+          default
+               put csi_deleteRequest(tFileName) into tResult
+               if "true" is in tResult then return true else return false
+               break
+     end switch
+end csi_deleteRequest
+
+
+
+private function _____EMAIL
+end _____EMAIL
+function csi_HTTPUploadEmail pInputA --pTo,pFrom,pSubject,pBodyContent,pToken,pLink
+     local tData
+     
+     set the socketTimeoutInterval to kSocketTimeoutValue
+     
+     if the num of items of pInputA["to"] > 1 then
+          --MULTIPLE EMAILS
+          put "to_emails=" & the urlEncode of pInputA["to"] into tData
+     else
+          --SINGLE EMAIL
+          put "to_email=" & the urlEncode of pInputA["to"] into tData
+     end if
+     
+     put "&from_email=" & the urlEncode of base64Encode(pInputA["from"]) after tData
+     put "&subject=" & the urlEncode of base64Encode(pInputA["subject"]) after tData
+     put "&body_content=" & the urlEncode of base64Encode(pInputA["body"]) after tData
+     put "&token=" & pInputA["token"] after tData
+     
+     --UPLOAD THE REQUEST
+     post tData to url pInputA["link"]
+     return it
+end csi_HTTPUploadEmail
+
+
+
+private function _____ENCRYPTION
+end _____ENCRYPTION
+private function csi_encrypt pData, pType
+     switch pType
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               encrypt compress(pData) using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB AND LIVECLOUD
+               encrypt compress(pData) using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               encrypt compress(pData) using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CDBblob"
+               encrypt pData using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is not empty then return empty
+               return base64Encode(it)
+               break
+               
+          case "CDBdoc"
+               encrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_encrypt
+
+
+private function csi_decrypt pData, pType
+     switch pType
+          
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               decrypt pData using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB AND LIVECLOUD
+               decrypt pData using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               decrypt pData using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CDBblob"
+               decrypt base64Decode(pData) using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is empty then return it
+               break
+               
+          case "CDBdoc"
+               decrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_decrypt
+
+
+private function csi_MD5 pValue
+     local tRes
+     
+     get binaryDecode("H*",md5Digest("canela" && pValue),tRes)
+     return tRes
+end csi_MD5

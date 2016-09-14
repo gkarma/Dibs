@@ -1,0 +1,821 @@
+﻿script "CSI_General.lib"
+//>GLOBALS
+global gCSIconfigA, gCSIdatabaseA, gCSInewRequestA, gCSIteamDataA
+global gLogInfoA
+
+//>CONSTANTS
+constant kExclusionList = "i,I,L,l,1,o,O,',+,;,:,%,."
+
+
+on libraryStack
+     csi_debugOutput "...Loading:" && the short name of this stack
+     
+     if the long name of me is not in the long name of the target then pass libraryStack
+     if ("CDB_Starter.lib" is not in the stacksInUse) or not(csi_checkAuthentication()) then
+          --UNAUTHORIZED ENTRY
+          stop using me
+          exit to top
+     end if
+end libraryStack
+
+
+
+private function _____DELETE_RECORDS
+end _____DELETE_RECORDS
+command csi_deleteRecordsFromRAM pRecordID,pTableName,pTeamID
+     local tErrorA
+     
+     --pTableName AND pTeamID ARE REQUIRED FOR THIS API TO FUNCTION
+     if pTableName or pTeamID is empty then
+          put false into tErrorA["completed"]
+          put "Missing pTableName and/or pTeamID parameters." into tErrorA["response"]
+          put "csi_deleteRecordsFromRAM" into tErrorA["context"]
+          csi_saveResult tErrorA
+          exit csi_deleteRecordsFromRAM
+     end if
+     
+     --REMOVE SELECTED LINES FROM LOCAL DATABASE
+     if the keys of pRecordID = "*" then
+          delete var gCSIdatabaseA[gCSIteamDataA[pTeamID][pTableName]["tableID"]]
+     else
+          repeat for each key xRecordID in pRecordID
+               delete var gCSIdatabaseA[gCSIteamDataA[pTeamID][pTableName]["tableID"]] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID][xRecordID]
+               if gCSIdatabaseA[gCSIteamDataA[pTeamID][pTableName]["tableID"]] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] is empty then \
+                     delete var gCSIdatabaseA[gCSIteamDataA[pTeamID][pTableName]["tableID"]] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID]
+          end repeat
+     end if
+end csi_deleteRecordsFromRAM
+
+
+
+private function _____ORGANIZE_SAVED_RECORDS
+end _____ORGANIZE_SAVED_RECORDS
+command csi_reorganizeDatabaseFolders pFileCount,pDatabaseName,pTeamID
+     local tCountFiles, tDirectoryPath, tFileList, tFolderList
+     local tFolderName, tLastFolderUsed, tPlatform, tResult
+     
+     --THIS COMMAND WILL ORGANIZE DATABASE FOLDERS INTO MULTI FOLDER WITH SMALLER FILE COUNTS
+     
+     put the platform into tPlatform
+     put csi_DirectoryCassiaDB() into tDirectoryPath
+     put "database" & slash & pTeamID & slash & pDatabaseName & slash after tDirectoryPath
+     set the directory to tDirectoryPath
+     
+     put the result into tResult
+     if the result is not empty then return tResult
+     
+     put the files into tFileList
+     filter tFileList without ".*"
+     filter tFileList without empty
+     
+     put the folders into tFolderList
+     filter tFolderList without ".."
+     filter tFolderList without empty
+     
+     
+     set the itemDel to "_"
+     sort tFolderList descending numeric by item 2 of each
+     put item 2 of line 1 of tFolderList into tLastFolderUsed
+     
+     if tLastFolderUsed is empty then
+          --THIS IS OUR FIRST FOLDER
+          put 0 into tLastFolderUsed
+          
+          put ("data_" & (tLastFolderUsed + 1)) into tFolderName
+          create folder tFolderName
+     else
+          --WE ALREADY HAVE ONE OR MORE FOLDERS
+          put line 1 of tFolderList into tFolderName
+          set the directory to tDirectoryPath & slash & tFolderName
+          put the files into tCountFiles
+          filter tCountFiles without ".*"
+          put the num of lines of tCountFiles into tCountFiles
+          if tCountFiles >= pFileCount then
+               set the directory to tDirectoryPath
+               put ("data_" & (tLastFolderUsed + 1)) into tFolderName
+               create folder tFolderName
+          end if
+     end if
+     
+     --MOVE FILES
+     repeat for each line thisFile in tFileList
+          csi_macMoveFile(tDirectoryPath & thisFile),(tDirectoryPath & tFolderName & slash & thisFile)
+     end repeat
+end csi_reorganizeDatabaseFolders
+
+
+
+private command _____AUTH
+end _____AUTH
+function csi_generatePHPToken pEmail
+     local tToken
+     
+     --CREATE A TOKEN FOR PHP VALIDATION
+     put pEmail into tToken
+     put char 1 of tToken after tToken
+     put "CanelaSoftwareDBHash" into char 1 of tToken
+     replace "@" with "#" in tToken
+     put sha1Digest(tToken) into tToken
+     get binaryDecode("H*",tToken,tToken)
+     return tToken
+end csi_generatePHPToken
+
+
+
+private command _____MISC
+end _____MISC
+function csi_separateKeyAndValueFromXML pData
+     local tRightSideOfKey, tXMLa
+     
+     --STORE AND REMOVE THE TAG VALUES FROM THE ACTUAL SCHEMA
+     put Offset(">",pData) into tRightSideOfKey
+     put char 1 to tRightSideOfKey of pData into tXMLa["key"]
+     delete char 1 of tXMLa["key"]
+     delete char -1 of tXMLa["key"]
+     delete char 1 to tRightSideOfKey of pData
+     put pData into tXMLa["value"]
+     return tXMLa
+end csi_separateKeyAndValueFromXML
+
+
+function csi_MergeArrays pFromA,pToA,pEmptyOverwrite
+     switch pEmptyOverwrite
+          case false
+               repeat for each key thisKey in pFromA
+                    if pFromA[thisKey] is not empty then put pFromA[thisKey] into pToA[thisKey]
+               end repeat
+               break
+               
+          default
+               repeat for each key thisKey in pFromA
+                    put pFromA[thisKey] into pToA[thisKey]
+               end repeat
+               break
+     end switch
+     
+     return pToA
+end csi_MergeArrays
+
+
+command csi_alternateLines pFieldName,pColor1,pColor2
+     local tImageID
+     
+     lock screen
+     if exists(img "alternating colors") then delete img "alternating colors"
+     set the fixedLineHeight of field pFieldName to true
+     set the topmargin of field pFieldName to 4
+     if there is not a grc "Line 1" then create grc "Line 1"
+     if there is not a grc "Line 2" then create grc "Line 2"
+     set the opaque of grc "Line 2" to true
+     set the opaque of grc "Line 1" to true
+     set the linesize of grc "Line 2" to 0
+     set the linesize of grc "Line 1" to 0
+     set the backcolor of grc "Line 2" to pColor2
+     set the backcolor of grc "Line 1" to pColor1
+     set the width of grc "Line 1" to the effective textheight of field pFieldName
+     set the width of grc "Line 2" to the effective textheight of field pFieldName
+     set the height of  grc "Line 1" to  2* (the effective textheight of field pFieldName)
+     set the height of  grc "Line 2" to  (the effective textheight of field pFieldName)
+     set the bottomleft of  grc "Line 2" to the bottomleft of  grc "Line 1"
+     import snapshot from rectangle (rect of grc "Line 1") of this card
+     put the id of the last image into tImageID
+     set the name of the last image to "alternating colors"
+     set the backgroundpattern of field pFieldName to tImageID
+     delete grc "Line 1"
+     delete grc "Line 2"
+     set the vis of img "alternating colors" to false
+     unlock screen
+end csi_alternateLines
+
+
+
+private command _____ANALYTICS_LOG
+end _____ANALYTICS_LOG
+command csi_timeProcessStart
+     local tActiveLog, tRecordID, tStartProcessTimer
+     
+     set the directory to "logs"
+     
+     --CHECK FILE SIZE OF ACTIVE LOG FILE
+     put url ("file:" & specialFolderPath("desktop") & "/logs/activeLog.txt") into tActiveLog
+     if the num of lines of tActiveLog > 9 then
+          --ARCHIVE THIS LOG AND MAKE A NEW ONE
+          put tActiveLog into url ("file:" & specialFolderPath("desktop") & "/logs/log_" & csi_longSeconds() & ".txt")
+          put empty into url ("file:" & specialFolderPath("desktop") & "/logs/activeLog.txt")
+     end if
+     
+     if the num of items of gCSInewRequestA["cdbRecordID"] > 1 then put empty into tRecordID else put gCSInewRequestA["cdbRecordID"] into tRecordID
+     
+     put csi_longSeconds() into tStartProcessTimer
+     
+     --WRITE TO FILE
+     put the UUID() & comma & "" & comma & gCSIconfigA["Server"]["instanceName"] & "_" & gCSIconfigA["Server"]["node"] & comma & gCSInewRequestA["cdbTeamID"] & comma & gCSInewRequestA["cdbTableName"] & \
+           comma & tRecordID & comma & gCSInewRequestA["requestType"] & comma & gLogInfoA["requestFileSize"] & comma & \
+           gLogInfoA["startDirectoryTime"] & comma & gLogInfoA["endDirectoryTime"] & comma & gLogInfoA["fileCount"] & comma & \
+           tStartProcessTimer into gLogInfoA["activeLog"]
+end csi_timeProcessStart
+
+
+command csi_timeProcessEnd
+     local tLogLine
+     
+     --CLOSE LOG ON THIS TRANSACTION
+     put gLogInfoA["activeLog"] & comma & csi_longSeconds() & comma & gLogInfoA["responseFileSize"] & lf into tLogLine
+     
+     delete var gLogInfoA
+     
+     open file (specialFolderPath("desktop") & "/logs/activeLog.txt") for append
+     write tLogLine to file (specialFolderPath("desktop") & "/logs/activeLog.txt")
+     close file (specialFolderPath("desktop") & "/logs/activeLog.txt")
+end csi_timeProcessEnd
+
+
+
+private function _____EXTERNALS
+end _____EXTERNALS
+command csi_manageExternal pExternalA
+     local tExternalFiles, tOrigStack
+     
+     --ARRAY KEYS: STACKNAME=EXTERNAL NAME, REQUEST=ON/OFF, WINPATH=PATH TO DLL, MACPATH=PATH TO .BUNDLE
+     --RESULT IS EMPTY ON SUCCESS, POPULATED ON ERROR WITH APPROPRIATE MESSAGE
+     if pExternalA["StackName"] is empty then return "no name specified" --NO NAME MEANS WE CAN'T INTERACT WITH ANYTHING
+     if pExternalA["Request"] is "off" or pExternalA["Request"] is "disable" or pExternalA["Request"] is "false" or pExternalA["Request"] is empty then
+          if exists(stack ("sk_External" && pExternalA["StackName"])) then close stack ("sk_External" && pExternalA["StackName"]) --TURN IT OFF
+          return empty --COMPLETED SUCCESSFULLY
+     end if
+     if exists(stack ("sk_External" && pExternalA["StackName"])) then return "already on" --MAKE SURE WE'RE NOT TRYING TO TURN SOMETHING ON IF IT'S ALREADY ON
+     
+     put the topStack into tOrigStack --STORE THE ORIGINATING STACK @@@@@
+     
+     --IF WE DON'T HAVE A VALID PATH TO THE EXTERNAL, STOP HERE (WITH ERROR)
+     if platform() is "MacOS" and (there is not a folder pExternalA["MacPath"] and there is not a file pExternalA["MacPath"]) or \
+           platform() is "Win32" and there is not a file pExternalA["WinPath"] then return "external file not found"
+     
+     --DO THE MAGIC (CREATE STACK WITH THE APPROPRIATE EXTERNALS AND LOAD AS LIBRARY)
+     if platform() is "MacOS" then put pExternalA["MacPath"] into tExternalFiles
+     if platform() is "Win32" then put pExternalA["WinPath"] into tExternalFiles
+     reset templatestack
+     set destroyWindow of templatestack to true
+     set destroyStack of templatestack to true
+     set visible of templatestack to false
+     set externals of templatestack to tExternalFiles
+     create stack ("sk_External" && pExternalA["StackName"])
+     reset templatestack
+     open stack ("sk_External" && pExternalA["StackName"])
+     start using stack ("sk_External" && pExternalA["StackName"])
+     
+     open stack tOrigStack --RETURN FOCUS BACK TO ORIGINATING STACK @@@@@
+     return empty --COMPLETED SUCCESSFULLY
+end csi_manageExternal
+
+
+
+private function _____DATA_PROCESSING
+end _____DATA_PROCESSING
+function csi_CompareDifferenceInVariablesByLines pVar1,pVar2
+     local tFoundLine
+     
+     --THIS FUNCTION WILL COMPARE THE LINES OF ONE VARIABLE TO ANOTHER
+     --IT WILL RETURN A LIST OF LINES THAT ARE DIFFERENT
+     sort lines of pVar2 descending numeric by word 1 of each
+     
+     --REMOVE COMMON LINES FROM pVar1
+     set wholeMatches to true
+     repeat for each line thisLine in pVar2
+          put lineOffset(thisLine,pVar1) into tFoundLine
+          if tFoundLine > 0 then delete line tFoundLine of pVar1
+     end repeat
+     
+     --REMAINING KEYS IN pVar1
+     return pVar1
+end csi_CompareDifferenceInVariablesByLines
+
+
+on csi_macMoveFile pOldFile,pNewFile
+     local tCommand, tResult
+     
+     put ("mv" && quote & pOldFile & quote && quote & pNewFile & quote) into tCommand
+     put shell(tCommand) into tResult
+end csi_macMoveFile
+
+
+command deleteFolder pPath
+     if the platform is "Win32" then
+          revDeleteFolder pPath
+          return the result
+     else
+          replace space with "\ " in pPath
+          get shell("rm -rf" && pPath)
+          return it
+     end if
+end deleteFolder
+
+
+
+private function _____VIDEO_CAMERA
+end _____VIDEO_CAMERA
+command csi_previewVideo
+     if the platform is "macos" or the platform is "linux" then
+          revInitializeVideoGrabber the short name of this stack,"QT",the rect of grc "picture backdrop"
+          send "csi_IdleGrab" to me in 30 milliseconds
+     end if
+     
+     if the platform is "win32" then
+          revInitializeVideoGrabber the short name of this stack,"directx",the rect of grc "picture backdrop"
+     end if
+     
+     revPreviewVideo
+end csi_previewVideo
+
+
+command csi_idleGrab
+     send "revVideoGrabIdle" to me in 50 milliseconds
+     send "csi_IdleGrab" to me in 60 milliseconds
+end csi_idleGrab
+
+
+
+private function _____PASSWORDS
+end _____PASSWORDS
+private function csi_generateSecurePassword pCharCount
+     local tFunction, tKey, tNextKey, tUsedA
+     local tFunctionSet = "randomLowerCase,randomUpperCase,randomNumber,randomSymbol"
+     
+     delete var tUsedA
+     delete var tKey
+     
+     --range a(97) to z(122)
+     --no i(105)
+     --no l(108)
+     --no o(111)
+     
+     --GENERATE A KEY
+     put randomLowerCase() into tKey
+     put randomUpperCase() after tKey
+     put randomNumber() after tKey
+     put randomSymbol() after tKey
+     
+     repeat until the num of chars of tKey=pCharCount
+          put item (random(num of items of tFunctionSet)) of tFunctionSet into tFunction
+          dispatch function tFunction to me
+          put the result into tNextKey
+          if tNextKey is in kExclusionList or tNextKey is quote or tNextKey is comma or tNextKey is "." then next repeat
+          
+          put tNextKey after tKey
+          add 1 to tUsedA[tFunction]
+          if tUsedA[tFunction] >=4 then
+               delete item (itemOffset(tFunction,tFunctionSet)) of tFunctionSet
+          end if
+          
+     end repeat
+     
+     return tKey
+end csi_generateSecurePassword
+
+
+function randomLowerCase
+     return numToChar(random(26)+96)
+end randomLowerCase
+
+
+function randomUpperCase
+     return numToChar(random(26)+64)
+end randomUpperCase
+
+
+function randomNumber
+     return random(10)-1
+end randomNumber
+
+
+function randomSymbol
+     local tNum
+     
+     put random(31)+32 into tNum
+     return numToChar(tNum)
+end randomSymbol
+
+
+private function csi_hashPassword pOldPassword
+     local tNewPassword
+     
+     put pOldPassword into tNewPassword
+     
+     repeat 28
+          put sha1Digest(tNewPassword) into tNewPassword
+     end repeat
+     put base64encode(tNewPassword) into tNewPassword --*****PW_SECURITY
+     put URLencode(tNewPassword) into tNewPassword
+     replace "%" with "" in tNewPassword
+     
+     return tNewPassword
+end csi_hashPassword
+
+
+command csi_updateLiveCloudForumAccount pClientDataA
+     local tEM, tEmail1, tEmail2, tEmailEncrypted, tForumID, tID
+     local tIV, tLink, tMessage, tPassword1, tPassword2, tPasswordEncrypted
+     local tPHPechoA, tPW, tRawEmail, tRawPassword, tRawUsername
+     local tResult, tToken, tUN, tURL, tUsername1, tUsername2
+     local tUsernameEncrypted
+     
+     put pClientDataA["userName"] into tRawUsername
+     if pClientDataA["email"] <> empty then put pClientDataA["email"] into tRawEmail
+     if pClientDataA["forumPassword"] <> empty then put pClientDataA["forumPassword"] into tRawPassword
+     
+     put "http://liveclouddb.io/LCupdateuser.php" into tURL
+     put "http://livecloud.io/LCupdateuser.php" into tURL
+     
+     put sk_CreateEncryptionIV() into tIV
+     
+     put sk_WebEncrypt(tRawUsername,tIV) into tUsernameEncrypted
+     put sk_WebEncrypt(tRawEmail,tIV) into tEmailEncrypted
+     put sk_WebEncrypt(tRawPassword,tIV) into tPasswordEncrypted
+     
+     put urlEncode(tUsernameEncrypted) into tUN
+     put urlEncode(tEmailEncrypted) into tEM
+     put urlEncode(tPasswordEncrypted) into tPW
+     
+     put urlDecode(tUN) into tUsername1
+     put urlDecode(tEM) into tEmail1
+     put urlDecode(tPW) into tPassword1
+     
+     put sk_WebDecrypt(tUsername1,tIV) into tUsername2
+     put sk_WebDecrypt(tEmail1,tIV) into tEmail2
+     put sk_WebDecrypt(tPassword1,tIV) into tPassword2
+     
+     -- CREATE A TOKEN FOR PHP VALIDATION
+     put tRawEmail into tToken
+     put char 1 of tToken after tToken
+     put "CanelaSoftwareDBHash" into char 1 of tToken
+     replace "@" with "#" in tToken
+     put sha1Digest(tToken) into tToken
+     get binaryDecode("H*",tToken,tToken)
+     
+     --     $user_id = _INPUT('user_id');
+     --     $new_password = _INPUT('new_password');
+     --     $new_email  = _INPUT('new_email');
+     --     $ext_iv = _INPUT('csi_iv');
+     
+     put pClientDataA["lcForumUserID"] into tForumID
+     put empty into tForumID
+     if tForumID is empty then
+          put "http://livecloud.io/LCuid.php?username=" into tLink
+          put pClientDataA["username"] after tLink
+          put URL tLink into tID
+          put tID into pClientDataA["lcForumUserID"]
+     end if
+     
+     -- GATHER IT UP ....
+     put "user_id=" & pClientDataA["lcForumUserID"] & "&token=" & tToken into tMessage
+     If pClientDataA["email"] <> empty then put "&new_email=" & tEM after tMessage
+     put "&new_password=" & tPW after tMessage
+     put "&csi_iv=" & tIV after tMessage
+     
+     -- ... AND SEND IT UP
+     post tMessage to URL tURL
+     put csi_ParseCML(it) into tPHPechoA
+     put the result into tResult
+     if tPHPechoA["completed"] then
+          dispatch "cse_GrowlUser" to (line 1 of the recentCards) with "complete","forum password change"
+     end if
+end csi_updateLiveCloudForumAccount
+
+
+
+private function _____LOGS
+end _____LOGS
+command csi_WriteToLog pMessage,pParamA
+     local tKeyList, tOriginalDirectory, tSysDelim, tTimeDateStamp
+     local tXMLDelim
+     
+     --STOP WRITING LOGS FOR NOW
+     exit csi_WriteToLog
+     
+     put the directory into tOriginalDirectory
+     set the fileType to "iRchTEXT"
+     
+     put "- - - - - - - - - - - - - - - - - - - - -" into tXMLDelim
+     put "# # # # # # # # # # # # # # # # # # # # #" into tSysDelim
+     put the internet english date into tTimeDateStamp
+     
+     switch pMessage
+          case "Basic"
+               --TIME STAMP
+               put tTimeDateStamp & lf after URL ("file:" & csi_DirectoryAppFolder() & gCSIconfigA["Server"]["serverLog"])
+               
+               --WRITE MESSAGE
+               put the keys of pParamA into tKeyList
+               sort tKeyList ascending numeric
+               repeat for each line thisKey in tKeyList
+                    put pParamA[thisKey] & lf after URL ("file:" & gCSIconfigA["Server"]["serverLog"]) --WRITE MESSAGE TO DISK LOG
+               end repeat
+               break
+               
+          case "Raw XML"
+               --WRITE MESSAGE
+               put the keys of pParamA into tKeyList
+               sort tKeyList ascending numeric
+               repeat for each line thisKey in tKeyList
+                    put lf & lf & tXMLDelim & lf & tTimeDateStamp & lf & pParamA[thisKey] & lf & tXMLDelim & lf after URL ("file:" & csi_DirectoryAppFolder() & gCSIconfigA["Server"]["serverLog"])
+               end repeat
+               break
+     end switch
+     
+     set the directory to tOriginalDirectory
+end csi_WriteToLog
+
+
+
+private function _____CML_PROCESSING
+end _____CML_PROCESSING
+function csi_parseCML pData
+     local tBuiltArray, tCharOffset, tCloseOffset, tContent, tParsedA
+     local tShortTag, tTag, tTagList, tTagOffset
+     
+     put false into tBuiltArray
+     repeat
+          if char 1 of pData is lf then delete char 1 of pData --IGNORE EXTRA SPACING (LEADING SPACE IS NEVER PART OF A KEY)
+          put pData into tTagList
+          filter tTagList with "*<[a-zA-Z0-9]*>*" --GET THE XML TAGS (MUST CONTAIN AT LEAST 1 LETTER OR NUMBER)
+          if the num of lines of tTagList is 0 then exit repeat
+          
+          --CHUNK THE DATA TO PARSE
+          set the itemDel to ">"
+          put true into tBuiltArray
+          put line 1 of tTagList into tTag
+          put (item 1 of tTag & ">") into tShortTag
+          put lineOffset(tShortTag,pData) into tTagOffset
+          csp_findCloseTag tShortTag,(line tTagOffset+1 to -1 of pData)
+          put the result into tCloseOffset
+          if tCloseOffset is 0 or tTagOffset = tCloseOffset then
+               --SINGLE-LINE TAG, SINGLE LINE DATA
+               put item 2 of tTag into tContent
+               if "</" is in tContent then
+                    set itemDelimiter to "<"
+                    delete last item of tContent
+               end if
+               put tContent into tParsedA[char 2 to -2 of tShortTag]
+               delete line tTagOffset of pData
+               next repeat
+          else
+               --LOOK FOR MALFORMED TAGS AND COMPENSATE
+               put offset(">",line tTagOffset of pData) into tCharOffset
+               if char tCharOffset+1 of line tTagOffset of pData is not empty then
+                    put lf after char tCharOffset of line tTagOffset of pData
+                    add 1 to tCloseOffset
+               end if
+               put offset("<",line tCloseOffset of pData) into tCharOffset
+               if tCharOffset > 1 then
+                    put lf before char tCharOffset of line tCloseOffset of pData
+                    add 1 to tCloseOffset
+               end if
+               
+               --RECURSE ON CHUNKED DATA, THEN REMOVE IT FROM THE REMAINING DATA
+               put csi_ParseCML(line (tTagOffset + 1) to (tCloseOffset - 1) of pData) into tParsedA[char 2 to -2 of tShortTag]
+               delete line tTagOffset to tCloseOffset of pData
+          end if
+     end repeat
+     
+     if tBuiltArray then return tParsedA else return pData
+end csi_parseCML
+
+
+private command csp_findCloseTag pTag, pData
+     local tCloseTag, tCloseTagList, tOffset, tOpenTagList, tSkipLines
+     local tTagA, tTagList, tValue
+     
+     put (char 1 of pTag & "/" & char 2 to -1 of pTag) into tCloseTag
+     
+     --DETERMINE THE LINE NUMBERS OF THE CLOSING TAGS
+     put 0 into tSkipLines
+     repeat
+          put lineOffset(tCloseTag,pData,tSkipLines) into tOffset
+          if tOffset is 0 then exit repeat
+          put tOffset+tSkipLines into tOffset --ACCOUNT FOR SKIPLINES
+          put lf & tOffset & comma & line tOffset of pData after tCloseTagList
+          put tOffset into tSkipLines
+     end repeat
+     if the num of lines of tCloseTagList < 2 then return 0 --NO CLOSING TAG FOUND, SO WE CAN STOP IMMEDIATELY
+     
+     --DETERMINE THE LINE NUMBERS OF THE OPENING TAGS
+     put 0 into tSkipLines
+     repeat
+          put lineOffset(pTag,pData,tSkipLines) into tOffset
+          if tOffset is 0 then exit repeat
+          put tOffset+tSkipLines into tOffset --ACCOUNT FOR SKIPLINES
+          put lf & tOffset & comma & line tOffset of pData after tOpenTagList
+          put tOffset into tSkipLines
+     end repeat
+     
+     put tOpenTagList & tCloseTagList into tTagA
+     filter tTagA without empty
+     sort tTagA ascending numeric
+     put tTagA into tTagList
+     split tTagA using lf and comma
+     
+     --LOOK FOR TAG PAIRS AND REMOVE THEM; THE LAST TAG STANDING IS THE ONE THAT MATCHES THE OPENING TAG THAT WE SKIPPED
+     put 1 into tValue
+     repeat
+          if the num of lines of tTagList < 2 then exit repeat
+          if "</" is not in tTagA[item 1 of line tValue of tTagList] and "</" is in tTagA[item 1 of line tValue + 1 of tTagList] then
+               delete var tTagA[item 1 of line tValue of tTagList]
+               delete var tTagA[item 1 of line tValue+1 of tTagList]
+               delete line tValue to tValue + 1 of tTagList
+               put max(tValue -1,1) into tValue
+               next repeat
+          end if
+          add 1 to tValue
+     end repeat
+     if item 1 of line 1 of tTagList is a number then return (item 1 of line 1 of tTagList)+1 else return 0
+end csp_findCloseTag
+
+
+
+private function _____CUSTOM_PROPERTIES
+end _____CUSTOM_PROPERTIES
+command csi_DeleteCustomProperty pProperty,pControl
+     get the customProperties of control pControl
+     set the wholeMatches to true
+     delete line lineOffset(pProperty,it) of it
+     set the customKeys of control pControl to it
+end csi_DeleteCustomProperty
+
+
+
+private function _____PENDING_MESSAGES
+end _____PENDING_MESSAGES
+command csi_CancelPendingMessages pMessage
+     local tCancelPendingMessage, tLine, tPendingMessages, tPendingMessagesCount
+     
+     put the pendingMessages into tPendingMessages
+     put the number of lines of tPendingMessages into tPendingMessagesCount
+     
+     put 0 into tLine
+     repeat tPendingMessagesCount
+          add 1 to tLine
+          if item 3 of line tLine of tPendingMessages = pMessage or pMessage = "All" then
+               put item 1 of line tLine of tPendingMessages into tCancelPendingMessage
+               cancel tCancelPendingMessage
+          end if
+     end repeat
+end csi_CancelPendingMessages
+
+
+
+private function _____EMAIL_VALIDATION
+end _____EMAIL_VALIDATION
+function csi_validateEmailAddress pWhat
+     local tIsIP, tNotIP, tValidEmail
+     
+     put matchText(pWhat,"[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?") into tValidEmail
+     put matchText(pWhat,"^[A-z0-9\.!#$%&'*+/=?^_`{|}~-]+[@][A-z0-9!#$%&'*+/=?^_`{|}~-]+([.][A-z0-9!#$%&'*+/=?^_`{|}~-]+)+[A-z]$") into tNotIP
+     put matchText(pWhat,"^(1*\d{1,2}|2[0-4]\d|25[0-5])\.(1*\d{1,2}|2[0-4]\d|25[0-5])\.(1*\d{1,2}|2[0-4]\d|25[0-5])\.(1*\d{1,2}|2[0-4]\d|25[0-5])(:\d{1,5})*$") into tIsIP
+     
+     if (tValidEmail or tIsIP or tNotIP) then return true
+     return false
+end csi_validateEmailAddress
+
+
+
+private function _____HELPER_FUNCTIONS_FOR_WORDPRESS
+end _____HELPER_FUNCTIONS_FOR_WORDPRESS
+function sk_webEncrypt pData, pIV
+     local tKey
+     
+     put "stak?@ukuT*sPUN!8a+rudU3ANara7Ej" into tKey
+     if pIV is empty then \
+           put "tutHUS9_AcRecHaR" into pIV
+     --     put base64Encode(pData) into pData
+     try
+          encrypt pData using "aes-256-cbc" with key tKey and IV pIV
+     catch tError
+          return "error"
+     end try
+     return base64Encode(it)
+end sk_webEncrypt
+
+
+function sk_webDecrypt pData, pIV
+     local tKey
+     
+     put "stak?@ukuT*sPUN!8a+rudU3ANara7Ej" into tKey
+     if pIV is empty then \
+           put "tutHUS9_AcRecHaR" into pIV
+     put base64Decode(pData) into pData
+     try
+          decrypt pData using "aes-256-cbc" with key tKey and IV pIV
+     catch tError
+          return "error"
+     end try
+     return it
+end sk_webDecrypt
+
+
+function sk_createEncryptionIV
+     local tIV, tList
+     
+     put "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" into tList
+     repeat 16
+          put char random(len(tList)) of tList after tIV
+     end repeat
+     return tIV
+end sk_createEncryptionIV
+
+
+
+private function _____ENCRYPTION
+end _____ENCRYPTION
+private function csi_encrypt pData, pType
+     switch pType
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               encrypt compress(pData) using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB AND LIVECLOUD
+               encrypt compress(pData) using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               encrypt compress(pData) using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CDBblob"
+               encrypt pData using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is not empty then return empty
+               return base64Encode(it)
+               break
+               
+          case "CDBdoc"
+               encrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_encrypt
+
+
+private function csi_decrypt pData, pType
+     switch pType
+          
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               decrypt pData using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB AND LIVECLOUD
+               decrypt pData using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               decrypt pData using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CDBblob"
+               decrypt base64Decode(pData) using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is empty then return it
+               break
+               
+          case "CDBdoc"
+               decrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_decrypt
+
+
+private function csi_MD5 pValue
+     local tRes
+     
+     get binaryDecode("H*",md5Digest("canela" && pValue),tRes)
+     return tRes
+end csi_MD5

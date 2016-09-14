@@ -1,0 +1,1099 @@
+﻿script "CSI_Server.lib"
+//>GLOBALS
+global gCachedProcessedFileNames, gCDBresultA, gCSIconfigA, gCSIdatabaseA
+global gCSIindexTableNameA, gCSInewRequestA, gCSIteamDataA, gLogInfoA
+global gProcessingOrderFlag
+
+//>LOCALS
+local sDevResultsA
+
+
+on libraryStack
+     csi_debugOutput "...Loading:" && the short name of this stack
+     
+     if the short name of the target is not the short name of me then pass libraryStack
+     if ("CDB_Starter.lib" is not in the stacksInUse) or not(csi_checkAuthentication()) then
+          --UNAUTHORIZED ENTRY
+          stop using me
+          exit to top
+     end if
+end libraryStack
+
+
+
+on ____MAIN_LOOP
+end ____MAIN_LOOP
+on csi_mainLoopStandalone
+     local tDownloadedDirectory, tTotalFilesToProcess, tValidateAPI, tJSON
+     
+     csi_debugOutput ("+Main" && gCSIconfigA["communicationFolder"] && "Loop Start") --*DEBUG*
+     
+     if gProcessingOrderFlag is false then exit to top
+     
+     --CHECK FOR NEW TRANSACTIONS
+     put csi_longSeconds() into gLogInfoA["startDirectoryTime"]
+     
+     switch gCSIconfigA["Server"]["checkNewTransactions"]
+          case "single"
+               put csi_getSingleDirectory() into tDownloadedDirectory
+               break
+               
+          case "multi"
+               csi_getMultiDirectory --ASSEMBLE MULTI-FILE SUBMISSIONS
+               break
+               
+          default
+               --SUPPORTS 'BOTH' MODE AND CHECKS BOTH LOCATIONS (SERVER SHOULD USE THIS SESSION)
+               csi_getMultiDirectory --ASSEMBLE MULTI-FILE SUBMISSIONS
+               put csi_getSingleDirectory() into tDownloadedDirectory
+               break
+     end switch
+     
+     put csi_longSeconds() into gLogInfoA["endDirectoryTime"]
+     
+     -------------------------
+     if tDownloadedDirectory is not empty then
+          put the num of lines of tDownloadedDirectory into tTotalFilesToProcess
+          put the num of lines of tDownloadedDirectory into gLogInfoA["fileCount"]
+          put line 1 to gCSIconfigA["server"]["processRequestCount"] of tDownloadedDirectory into tDownloadedDirectory --ONLY PROCESS REQUESTS IN BATCHES
+          
+          repeat for each line thisLine in tDownloadedDirectory
+               --IGNORE FILES THAT HAVE ALREADY BEEN PROCESSED
+               if the num of lines of gCachedProcessedFileNames > 2000 then
+                    delete line 1 to 1000 of gCachedProcessedFileNames
+               end if
+               
+               put thisLine & lf after gCachedProcessedFileNames
+               
+               --VARIABLE INIT
+               put empty into gCSInewRequestA
+               put empty into tValidateAPI
+               
+               
+               -------------------------
+               --DOWNLOAD CURRENT REQUEST
+               put csi_getRequest(thisLine) into gCSInewRequestA
+               if gCSInewRequestA is empty then next repeat
+               
+               
+               -------------------------
+               --LOG CURRENT REQUEST
+               put csi_ArrayToJSONinsecure(gCSInewRequestA["package"]) into tJSON
+               csi_debugOutput "createCloud request"
+               csi_debugOutput tJSON
+               
+               -------------------------
+               --RECORD SIZE OF INCOMING RECORD
+               put the num of chars of arrayEncode(gCSInewRequestA) into gLogInfoA["requestFileSize"]
+               put thisLine into gCSInewRequestA["requestFileName"]
+               
+               
+               -------------------------
+               --BACKUP ORDER IN XML FORM TO LOG
+               --               put gCSInewRequestA into tParamA[1]
+               --               csi_writeToLog "Raw XML",tParamA
+               
+               
+               -------------------------
+               --ANALYTICS DATA COMES FROM CLIENT PACKAGE
+               
+               
+               -------------------------
+               --VALIDATE INCOMING API REQUESTS
+               put "lookUpCloudValue,updateUsersConfigDataServer,createAccount,cloudSyncIndex,mergeCloud,deleteCloud,readCloud,listCloudValues,createCloud,updateCloud,ping,cloudRecordCount,queryCloud" into tValidateAPI
+               
+               if gCSInewRequestA["requestType"] is not in tValidateAPI then
+                    csi_debugOutput "Incoming API did not pass validation" && the short name of this stack
+                    csi_deleteRequest
+                    next repeat
+               end if
+               
+               -------------------------
+               --KEY SIZE LIMIT FROM CLIENT PACKAGE
+               --SOME CLIENTS MAY HAVE DIFFERENT LIMITS
+               put gCSInewRequestA["coreValues"]["keySizeLimit"] into gCSIconfigA["CassiaDB"]["keySizeLimit"]
+               
+               
+               -------------------------
+               --VERIFY TEAM ID
+               if gCSInewRequestA["teamID"] is not in the keys of gCSIteamDataA then
+                    csi_debugOutput "Incoming API did not pass teamID validation" && the short name of this stack
+                    csi_deleteRequest
+                    ## NEED TO RESPOND TO DEV WITH ERROR HERE --******@@@@@
+                    next repeat
+               end if
+               
+               --VERIFY TABLE
+               if gCSInewRequestA["tableName"] is not in the keys of gCSIteamDataA[gCSInewRequestA["teamID"]] then
+                    csi_debugOutput "Incoming API did not pass tableName validation" && the short name of this stack
+                    csi_deleteRequest
+                    ## NEED TO RESPOND TO DEV WITH ERROR HERE --******@@@@@
+                    next repeat
+               end if
+               
+               -------------------------
+               --BUILD USAGE DATA ON DEV
+               --LOG TRANSACTION TO TEXT DOCUMENT
+               --MUST DO THIS AFTER SWITCHING SCHEMA ON THE FLY
+               csi_timeProcessStart
+               
+               
+               -------------------------
+               --SET UP gLogInfoA["responseFileSize"] WITH DEFAULT VALUE
+               put 0 into gLogInfoA["responseFileSize"]
+               
+               
+               -------------------------
+               --PROCESS REQUEST
+               put "csi_" before gCSInewRequestA["requestType"]
+               dispatch gCSInewRequestA["requestType"]
+               csi_deleteRequest
+               csi_timeProcessEnd
+               next repeat
+          end repeat
+     end if
+     
+     
+     -------------------------
+     if gProcessingOrderFlag then
+          csi_shutDownServer
+          send "csi_startServer" to stack the short name of this stack in gCSIconfigA["Server"]["pollingSpeed"] milliseconds
+     end if
+end csi_mainLoopStandalone
+
+
+
+private function ____SERVER_STATE
+end ____SERVER_STATE
+command csi_StartServer
+     lock screen
+     set the innerGlow of btn "start server" of card "server" of stack gCSIconfigA["Server"]["mainStack"] to true
+     set the innerGlow["color"] btn "start server" of card "server" of stack gCSIconfigA["Server"]["mainStack"] to 0,255,0
+     set the innerGlow["size"] of btn "start server" of card "server" of stack gCSIconfigA["Server"]["mainStack"] to 8
+     set the innerGlow of btn "stop server" of card "server" of stack gCSIconfigA["Server"]["mainStack"] to false
+     unlock screen
+     
+     set the cServerState of stack gCSIconfigA["Server"]["mainStack"] to true
+     put true into gProcessingOrderFlag
+     send "csi_mainLoopStandalone" to me in 5 milliseconds
+end csi_StartServer
+
+
+command csi_RestartServer
+     csi_CancelPendingMessages "All"
+     put false into gProcessingOrderFlag
+     resetAll
+     wait 30 ticks
+     send "csi_startServer" to me in 50 milliseconds
+end csi_RestartServer
+
+
+command csi_ShutDownServer
+     csi_cancelPendingMessages "csi_startServer"
+     
+     set the cServerState of stack gCSIconfigA["Server"]["mainStack"] to false
+     put false into gProcessingOrderFlag
+end csi_ShutDownServer
+
+
+command csi_PauseServer
+     set the cServerState of stack gCSIconfigA["Server"]["mainStack"] to "pause"
+     
+     lock screen
+     set the innerGlow of btn "stop server" of card "server" to true
+     set the innerGlow["color"] of btn "stop server" of card "server" to 255,0,0
+     set the innerGlow["size"] of btn "stop server" of card "server" to 8
+     set the innerGlow of btn "start server" of card "server" to false
+     unlock screen
+     
+     csi_CancelPendingMessages "csi_startServer"
+     put false into gProcessingOrderFlag
+     resetAll
+end csi_PauseServer
+
+
+command csi_ResumeServer
+     if the cServerState of stack gCSIconfigA["Server"]["mainStack"] is "pause" then
+          send "csi_startServer" to btn "start server" of card "server" of stack gCSIconfigA["Server"]["mainStack"] in 1 second
+     end if
+end csi_ResumeServer
+
+
+
+private function ____SERVER_PROCESSES
+end ____SERVER_PROCESSES
+function csi_getRequest pRequestFileName
+     local tCounter, tDownloadedTransactionA
+          
+     put 1 into tCounter
+     repeat 3
+          try
+               delete var tDownloadedTransactionA
+               put url("file:" & csi_directoryServerSingleRequests() & pRequestFileName) into tDownloadedTransactionA
+               put base64Decode(tDownloadedTransactionA) into tDownloadedTransactionA
+               put csi_decrypt(tDownloadedTransactionA,"CSIcomms") into tDownloadedTransactionA
+               put arrayDecode(tDownloadedTransactionA) into tDownloadedTransactionA
+               put base64Decode(tDownloadedTransactionA["package"]) into tDownloadedTransactionA["package"]
+               put arrayDecode(tDownloadedTransactionA["package"]) into tDownloadedTransactionA["package"]
+          catch tErr
+               --FILE IS ILLEGAL OR BAD
+               add 1 to tCounter
+               if tCounter >=3 then
+                    get csi_deleteRequest(pRequestFileName)
+                    return empty
+               end if
+          end try
+     end repeat
+     
+     return tDownloadedTransactionA
+end csi_getRequest
+
+
+function csi_deleteRequest pFileName
+     delete file (csi_directoryServerSingleRequests() & pFileName)
+     if the result is empty then return true else return false
+end csi_deleteRequest
+
+
+command csi_exportDatabase pArrayA
+     switch pArrayA["format"]
+          case "JSON"
+               break
+               
+          case "LSON"
+               break
+     end switch
+end csi_exportDatabase
+
+
+
+private function ____ACCOUNT_PROCESSES
+end ____ACCOUNT_PROCESSES
+command csi_createAccount
+     local tDataA, tDataPackageA, tErrorA, tInputA, tOutput, tParametersA
+     local tRecordID, tResponseA, tResultA, tTableID, tTables
+     local tUsers
+     
+     --VERIFY NEW USER
+     put cdb_getTableID("cdbAccountsUsers") into tTableID
+     
+     put gCSInewRequestA["package"]["email"] into tInputA["query"]["value"]
+     put "email" into tInputA["query"]["key"]
+     put "=" into tInputA["query"]["operator"]
+     put "cdbAccountsUsers" into tInputA["cdbTableName"]
+     
+     put cdb_queryLocal(tInputA) into tOutput
+     if not cdb_Result() then
+          --BUILD RESPONSE
+          put "server issue" into tDataA["result"]
+          put gCDBresultA["recent"]["response"] into tDataA["response"]
+          put tDataA into tResponseA["response"]
+          put "EOF" into tResponseA["EOF"]
+          
+          --SEND RESPONSE
+          get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+          exit csi_createAccount
+     end if
+     
+     if tOutput is not empty then
+          --USERNAME IS ALREADY IN THE SYSTEM
+          --LET THE USER KNOW THEY EITHER ENTERED IN THEIR CREDITIALS INCORRECTLY
+          --BUILD RESPONSE
+          put "userName taken" into tDataA["result"]
+          put tDataA into tResponseA["response"]
+          put "EOF" into tResponseA["EOF"]
+          
+          --SEND RESPONSE
+          get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+          exit csi_createAccount
+     end if
+     
+     --teamID
+     put uuid() into tDataA["teamID"]
+     
+     --tableID
+     put uuid() into tDataA["tableID"]
+     
+     --AUTHKEY
+     put uuid() into tDataA["authKey"]
+     replace "-" with empty in tDataA["authKey"]
+     
+     
+     --COLLECT ESSENTIAL DATA
+     put gCSInewRequestA["package"]["email"] into tDataA["email"]
+     put gCSInewRequestA["package"]["password"] into tDataA["password"]
+     put gCSInewRequestA["package"]["firstName"] into tDataA["firstName"]
+     put gCSInewRequestA["package"]["lastName"] into tDataA["lastName"]
+     put gCSInewRequestA["package"]["tableName"] into tDataA["tableName"]
+     put gCSInewRequestA["package"]["keys"] into tDataA["devKeys"]
+     put "cdbTeamID,cdbRecordID,cdbTableID,cdbTableName" into tDataA["internalKeys"]
+     put "9000000" into tDataA["keySizeLimit"]
+     
+     --INSTANCE DATA
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] into tDataA["instanceName"]
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] into tDataA["instanceRequestFolder"]
+     put gCSIconfigA["Server"]["NewAccount"]["instanceName"] & "_" & tDataA["teamID"] into tDataA["instanceResponseFolder"]
+     
+     --TABLE DOMAIN
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into tDataA["tableDomain"]
+     
+     --STORE THIS DATA IN LiveCloudAccounts
+     put "teamID,email,password,firstName,lastName,authKey,linkToTables" into tUsers
+     put "tableName,tableID,tableDomain,instanceResponseFolder,instanceRequestFolder,instanceName,devKeys,keySizeLimit" into tTables
+     
+     set wholeMatches to true
+     repeat for each key xKey in tDataA
+          --CHECK EACH KEY OF INPUT
+          if tDataA[xKey] is empty then
+               put "The following key:" && "'" & xKey & "'" && "is empty. Each required key must have a value." into tErrorA["response"]
+               csi_saveResult tErrorA
+               
+               put empty into tDataA
+               put "schema key error" into tDataA["result"]
+               put tErrorA["response"] into tDataA["response"]
+               put tDataA into tResponseA["response"]
+               put "EOF" into tResponseA["EOF"]
+               
+               --SEND RESPONSE
+               get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+               exit csi_createAccount
+          else
+               --MASSAGE DATA
+               switch
+                    case itemOffset(xKey,tUsers) > 0
+                         put tDataA[xKey] into tDataPackageA[cdb_getTableID("cdbAccountsUsers")][1][xKey]
+                         break
+                         
+                    case itemOffset(xKey,tTables) > 0
+                         put tDataA[xKey] into tDataPackageA[cdb_getTableID("cdbAccountsTables")][2][xKey]
+                         break
+               end switch
+          end if
+     end repeat
+     
+     --FORCE OUR RECORD ID ON CREATE
+     put UUID() into tRecordID
+     put tRecordID into tDataPackageA[cdb_getTableID("cdbAccountsUsers")][1]["linkToTables"]
+     put tRecordID into tDataPackageA[cdb_getTableID("cdbAccountsTables")][2]["cdbRecordID"]
+     
+     --STORE DEV DATA IN ACCOUNTS SERVER
+     get cdb_batchCreateLocal(tDataPackageA)
+     if not cdb_result() then
+          put gCDBresultA["recent"]["response"] into tDataA
+          
+          --RESPOND TO DEV REQUEST
+          put tDataA into tResponseA["response"]
+          put "EOF" into tResponseA["EOF"]
+          get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+          exit csi_createAccount
+     end if
+     
+     --RESPOND TO DEV REQUEST
+     put tDataA into tResponseA["response"]
+     put "EOF" into tResponseA["EOF"]
+     get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+     
+     --BUILD DATA TO SEND TO DEV's DATA SERVER
+     delete var tInputA
+     
+     put tDataA["tableName"] into tInputA["tableName"]
+     put tDataA["devKeys"] into tInputA["devKeys"]
+     put tDataA["instanceName"] into tInputA["instanceName"]
+     put tDataA["instanceRequestFolder"] into tInputA["instanceRequestFolder"]
+     put tDataA["instanceResponseFolder"] into tInputA["instanceResponseFolder"]
+     put tDataA["tableDomain"] into tInputA["tableDomain"]
+     put tDataA["teamID"] into tInputA["teamID"]
+     put tDataA["tableID"] into tInputA["tableID"]
+     put tDataA["internalKeys"] into tInputA["internalKeys"]
+     
+     --COMMUNICATE WITH DEV's DATA SERVER
+     --BUILD PACKAGE
+     delete var tParametersA
+     put "updateUsersConfigDataServer" into tParametersA["requestType"]
+     put "Carbon" & "_" & "a364ba8c-9e42-431b-bb72-3580296a4435" into tParametersA["instanceResponseFolder"]
+     put "a364ba8c-9e42-431b-bb72-3580296a4435" into tParametersA["teamID"]
+     put "cdbDataUsers" into tParametersA["tableName"]
+     
+     --PROCESS CLOUD CALLS
+     csi_sendPackageToServer tInputA,tParametersA
+     put the result into tResultA
+end csi_createAccount
+
+
+command csi_updateUsersConfigDataServer
+     put gCSInewRequestA["package"]["devKeys"] into gCSIconfigA["Client"][gCSInewRequestA["package"]["teamID"]] [gCSInewRequestA["package"]["tableName"]] ["devKeys"]
+     put gCSInewRequestA["package"]["instanceName"] into gCSIconfigA["Client"][gCSInewRequestA["package"]["teamID"]] [gCSInewRequestA["package"]["tableName"]] ["instanceName"]
+     put gCSInewRequestA["package"]["tableDomain"] into gCSIconfigA["Client"][gCSInewRequestA["package"]["teamID"]] [gCSInewRequestA["package"]["tableName"]] ["tableDomain"]
+     put gCSInewRequestA["package"]["tableID"] into gCSIconfigA["Client"][gCSInewRequestA["package"]["teamID"]] [gCSInewRequestA["package"]["tableName"]] ["tableID"]
+     put gCSInewRequestA["package"]["teamID"] into gCSIconfigA["Client"][gCSInewRequestA["package"]["teamID"]] [gCSInewRequestA["package"]["tableName"]] ["teamID"]
+     put gCSInewRequestA["package"]["internalKeys"] into gCSIconfigA["Client"][gCSInewRequestA["package"]["teamID"]] [gCSInewRequestA["package"]["tableName"]] ["internalKeys"]
+     
+     csi_saveConfig gCSIconfigA
+     csi_buildTeamDataA
+     csi_buildInternalIndexes
+     cdb_loadTable
+end csi_updateUsersConfigDataServer
+
+
+
+private function ____CLOUD_PROCESSES
+end ____CLOUD_PROCESSES
+command csi_createCloud
+     get cdb_batchCreateLocal(gCSInewRequestA["package"])
+end csi_createCloud
+
+
+command csi_updateCloud
+     cdb_batchUpdateLocal gCSInewRequestA["package"]
+end csi_updateCloud
+
+
+command csi_queryCloud
+     local tData, tResponseA
+     
+     put cdb_batchQueryLocal(gCSInewRequestA["package"]) into tData
+     
+     --BUILD RESPONSE
+     put tData into tResponseA["response"]
+     put "EOF" into tResponseA["EOF"]
+     
+     --ENCRYPT FILE
+     get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+end csi_queryCloud
+
+
+command csi_ping
+     local tResponseA
+     
+     --BUILD RESPONSE
+     put "pong" into tResponseA["response"]
+     put "EOF" into tResponseA["EOF"]
+     
+     --SEND CLIENT RECORD
+     get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+end csi_ping
+
+
+command csi_cloudRecordCount
+     local tResponseA
+     
+     put cdb_countLocal(gCSInewRequestA["tableName"]) into tResponseA["response"]
+     
+     --BUILD RESPONSE
+     put "EOF" into tResponseA["EOF"]
+     
+     --SEND CLIENT RECORD
+     get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+end csi_cloudRecordCount
+
+
+command csi_listCloudValues
+     local tData, tResponseA, tResultA
+     
+     put cdb_listLocal(gCSInewRequestA["package"]) into tData
+     
+     --BUILD RESPONSE
+     put tData into tResponseA["response"]
+     put "EOF" into tResponseA["EOF"]
+     
+     --ENCRYPT FILE
+     put csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"]) into tResultA
+end csi_listCloudValues
+
+
+command csi_readCloud
+     local tData, tResponseA
+     
+     put cdb_batchReadLocal(gCSInewRequestA["package"]) into tData
+     
+     --BUILD RESPONSE
+     put tData into tResponseA["response"]
+     put "EOF" into tResponseA["EOF"]
+     
+     --ENCRYPT FILE
+     get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+end csi_readCloud
+
+
+command csi_deleteCloud
+     local tData, tResponseA
+     
+     cdb_batchDeleteLocal gCSInewRequestA["package"]
+     put the result into tData
+     
+     --BUILD RESPONSE
+     put tData into tResponseA["response"]
+     put "EOF" into tResponseA["EOF"]
+     
+     --ENCRYPT FILE
+     get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+end csi_deleteCloud
+
+
+command csi_mergeCloud
+     cdb_batchMergeLocal gCSInewRequestA["package"]
+end csi_mergeCloud
+
+
+command csi_lookUpCloudValue
+     local tData, tResponseA
+     
+     put cdb_lookUpLocalValue(gCSInewRequestA["package"]) into tData
+     
+     --BUILD RESPONSE
+     put tData into tResponseA["response"]
+     put "EOF" into tResponseA["EOF"]
+     
+     --ENCRYPT FILE
+     get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+end csi_lookUpCloudValue
+
+
+
+private function ____SERVER_PROCESSES_NOT_UPDATED_YET
+end ____SERVER_PROCESSES_NOT_UPDATED_YET
+command csi_superBatchError
+     put cdb_resultA("response") & lf after sDevResultsA["cdb_createLocal"]["error"]
+end csi_superBatchError
+
+
+command csi_cloudQueryRequest
+     local tFile, tQueryA, tQuerySetA, tResponse, tResultA
+     
+     switch gCSInewRequestA["queryType"]
+          case "basic"
+               switch
+                    case (char 1 of the version) >= 7
+                         if gCSInewRequestA["pQueryA"] <> "*" then put arrayDecode(base64Decode(gCSInewRequestA["pQueryA"])) into tQueryA else put "*" into tQueryA
+                         break
+                         
+                    default
+                         try
+                              if gCSInewRequestA["pQueryA"] <> "*" then put arrayDecode(base64Decode(gCSInewRequestA["pQueryA"])) into tQueryA else put "*" into tQueryA
+                         catch tError
+                              --SOMEONE ENCODED IN A METHOD THAT IS NOT UNDERSTANDABLE
+                              --PROBABLY LC 7 USING OLDER CASSIADB SDK
+                              put "<response>" & tError & lf into tFile
+                              put "<outputFormat>" & gCSInewRequestA["outputFormat"] & lf after tFile
+                              put lf & "<EOF>" & lf after tFile
+                              filter tFile without empty
+                              
+                              --ENCRYPT FILE
+                              put csi_encrypt(tFile,"CSIcomms") into tFile
+                              put csi_writeLocalResponse(tFile,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["requestFileName"]) into tResultA
+                              exit csi_cloudQueryRequest
+                         end try
+                         break
+               end switch
+               put cdb_basicLocalQuery(tQueryA,gCSInewRequestA["pTableName"],gCSInewRequestA["pOutputFormat"]) into tResponse
+               break
+               
+          case "advanced"
+               switch
+                    case (char 1 of the version) >= 7
+                         put arrayDecode(base64Decode(gCSInewRequestA["pQuerySetA"])) into tQuerySetA
+                         break
+                         
+                    default
+                         try
+                              put arrayDecode(base64Decode(gCSInewRequestA["pQuerySetA"])) into tQuerySetA
+                         catch tError
+                              --SOMEONE ENCODED IN A METHOD THAT IS NOT UNDERSTANDABLE
+                              --PROBABLY LC 7 USING OLDER CASSIADB SDK
+                              put "<response>" & tError & lf into tFile
+                              put "<outputFormat>" & gCSInewRequestA["outputFormat"] & lf after tFile
+                              put lf & "<EOF>" & lf after tFile
+                              filter tFile without empty
+                              
+                              --ENCRYPT FILE
+                              put csi_encrypt(tFile,"CSIcomms") into tFile
+                              put csi_writeLocalResponse(tFile,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["requestFileName"]) into tResultA
+                              exit csi_cloudQueryRequest
+                         end try
+                         break
+               end switch
+               put cdb_advancedLocalQuery(tQuerySetA,gCSInewRequestA["pLogicMap"],gCSInewRequestA["pTableName"],gCSInewRequestA["pOutputFormat"]) into tResponse
+               break
+     end switch
+     
+     --IF AN ERROR OCCURS THEN SEND BACK ERROR MESSAGE
+     if not cdb_result() then
+          put "<response>" & cdb_result("response") & lf into tFile
+          put "<outputFormat>" & gCSInewRequestA["outputFormat"] & lf after tFile
+          put lf & "<EOF>" & lf after tFile
+          filter tFile without empty
+          
+          --ENCRYPT FILE
+          put csi_encrypt(tFile,"CSIcomms") into tFile
+          put csi_writeLocalResponse(tFile,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["requestFileName"]) into tResultA
+          exit csi_cloudQueryRequest
+     end if
+     
+     --DATA TO RETURN IS TOO LARGE
+     if the num of chars of tResponse > 5000000 then
+          put "<response>" & "The result is too large to send back. Please refine query." & lf into tFile
+          put "<outputFormat>" & gCSInewRequestA["outputFormat"] & lf after tFile
+          put lf & "<EOF>" & lf after tFile
+          filter tFile without empty
+          
+          --ENCRYPT FILE
+          put csi_encrypt(tFile,"CSIcomms") into tFile
+          put csi_writeLocalResponse(tFile,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["requestFileName"]) into tResultA
+          exit csi_cloudQueryRequest
+     end if
+     
+     switch gCSInewRequestA["pOutputFormat"]
+          case "raw"
+          case "structured"
+          case "advanced"
+          case "basic"
+               --ARRAY ENCODE DATA USING THE APPROPRIATE FORMAT FOR CLIENT
+               ##BACKWARDS COMPATIBILITY CODE
+               switch
+                    case char 1 of the version >= 7 --SERVER IS USING LIVECODE 7 OR NEWER
+                         switch
+                              --CLIENT IS LIVECODE 6 OR OLDER
+                              case char 1 of gCSInewRequestA["sdkPlatform"] < 7
+                                   put base64Encode(arrayEncode(tResponse,6.7)) into tResponse
+                                   break
+                                   
+                                   --CLIENT IS LIVECODE 7 OR GREATER
+                              default
+                                   put base64Encode(arrayEncode(tResponse)) into tResponse
+                                   break
+                         end switch
+                         break
+                         
+                    case char 1 of the version < 7 --SERVER IS USING LIVECODE 6.7
+                         --WE CAN ONLY ARRAY ENCODE IN OLDER FORMAT
+                         put base64Encode(arrayEncode(tResponse)) into tResponse
+                         break
+               end switch
+               
+               --FLATTEN ARRAY FOR TRANSPORT
+               replace lf with empty in tResponse
+               break
+               
+          case "recordList"
+               replace lf with comma in tResponse
+               break
+     end switch
+     
+     put "<response>" & tResponse & lf into tFile
+     put "<outputFormat>" & gCSInewRequestA["outputFormat"] & lf after tFile
+     put lf & "<EOF>" & lf after tFile
+     filter tFile without empty
+     
+     --ENCRYPT FILE
+     put csi_encrypt(tFile,"CSIcomms") into tFile
+     put csi_writeLocalResponse(tFile,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["requestFileName"]) into tResultA
+end csi_cloudQueryRequest
+
+
+command csi_batchCloudQueryRequest
+     local tBatchQueryA, tFile, tResponse, tResultA
+     
+     switch
+          case (char 1 of the version) >= 7
+               put arrayDecode(base64Decode(gCSInewRequestA["pBatchQueryA"])) into tBatchQueryA
+               break
+               
+          default
+               try
+                    put arrayDecode(base64Decode(gCSInewRequestA["pBatchQueryA"])) into tBatchQueryA
+               catch tError
+                    --SOMEONE ENCODED IN A METHOD THAT IS NOT UNDERSTANDABLE
+                    --PROBABLY LC 7 USING OLDER CASSIADB SDK
+                    put "<response>" & tError & lf into tFile
+                    put lf & "<EOF>" & lf after tFile
+                    filter tFile without empty
+                    
+                    --ENCRYPT FILE
+                    put csi_encrypt(tFile,"CSIcomms") into tFile
+                    put csi_writeLocalResponse(tFile,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["requestFileName"]) into tResultA
+                    exit csi_batchCloudQueryRequest
+               end try
+               break
+     end switch
+     put cdb_batchLocalQuery(tBatchQueryA) into tResponse
+     
+     --IF AN ERROR OCCURS THEN SEND BACK ERROR MESSAGE
+     if not cdb_result() then
+          put "<response>" & cdb_result("response") & lf into tFile
+          put lf & "<EOF>" & lf after tFile
+          filter tFile without empty
+          
+          --ENCRYPT FILE
+          put csi_encrypt(tFile,"CSIcomms") into tFile
+          put csi_writeLocalResponse(tFile,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["requestFileName"]) into tResultA
+          exit csi_batchCloudQueryRequest
+     end if
+     
+     --ARRAY ENCODE DATA USING THE APPROPRIATE FORMAT FOR CLIENT
+     ##BACKWARDS COMPATIBILITY CODE
+     switch
+          case char 1 of the version >= 7 --SERVER IS USING LIVECODE 7 OR NEWER
+               switch
+                    --CLIENT IS LIVECODE 6 OR OLDER
+                    case char 1 of gCSInewRequestA["sdkPlatform"] < 7
+                         put base64Encode(arrayEncode(tResponse,6.7)) into tResponse
+                         break
+                         
+                         --CLIENT IS LIVECODE 7 OR GREATER
+                    default
+                         put base64Encode(arrayEncode(tResponse)) into tResponse
+                         break
+               end switch
+               break
+               
+          case char 1 of the version < 7 --SERVER IS USING LIVECODE 6.7
+               --WE CAN ONLY ARRAY ENCODE IN OLDER FORMAT
+               put base64Encode(arrayEncode(tResponse)) into tResponse
+               break
+     end switch
+     
+     --FLATTEN ARRAY FOR TRANSPORT
+     replace lf with empty in tResponse
+     
+     --DATA TO RETURN IS TOO LARGE
+     if the num of chars of tResponse > 5000000 then
+          put "<response>" & "The result is too large to send back. Please refine query." & lf into tFile
+          put "<outputFormat>" & gCSInewRequestA["outputFormat"] & lf after tFile
+          put lf & "<EOF>" & lf after tFile
+          filter tFile without empty
+          
+          --ENCRYPT FILE
+          put csi_encrypt(tFile,"CSIcomms") into tFile
+          put csi_writeLocalResponse(tFile,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["requestFileName"]) into tResultA
+          exit csi_batchCloudQueryRequest
+     end if
+     
+     --PACKAGE UP PAYLOAD
+     put "<response>" & tResponse & lf into tFile
+     put "<outputFormat>" & gCSInewRequestA["outputFormat"] & lf after tFile
+     put lf & "<EOF>" & lf after tFile
+     filter tFile without empty
+     
+     --ENCRYPT FILE
+     put csi_encrypt(tFile,"CSIcomms") into tFile
+     put csi_writeLocalResponse(tFile,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["requestFileName"]) into tResultA
+end csi_batchCloudQueryRequest
+
+
+command csi_lookUpCloudValueRequest
+     local tData, tFile, tResultA
+     
+     put cdb_lookUpLocalValue(gCSInewRequestA["pRecordID"],gCSInewRequestA["pSchemaKey"],gCSInewRequestA["pTableName"],gCSInewRequestA["pTeamID"]) into tData
+     
+     put "<response>" & lf into tFile
+     put tData & lf after tFile
+     put "</response>" & lf after tFile
+     put lf & "<EOF>" & lf after tFile
+     filter tFile without empty
+     
+     --ENCRYPT FILE
+     put csi_encrypt(tFile,"CSIcomms") into tFile
+     put csi_writeLocalResponse(tFile,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["requestFileName"]) into tResultA
+end csi_lookUpCloudValueRequest
+
+
+command csi_processEmailLinkBack
+     local tSchema
+     
+     --DO NOT PROCESS RECORDS THAT ARE OLD
+     if gCSIdatabaseA[gCSInewRequestA["cdbTeamID"]][gCSInewRequestA["cdbTableName"]][gCSInewRequestA["cdbRecordID"]]["verified"] is true then exit csi_processEmailLinkBack
+     
+     put true into gCSInewRequestA["verified"]
+     put the seconds into gCSInewRequestA["cdbDateCreated"]
+     put csi_generatePHPToken(gCSInewRequestA["email"]) into gCSInewRequestA["token"]
+     
+     --STORE RECORD TO DATABASE
+     put cdb_getSchema("advanced",gCSInewRequestA["cdbTableName"]) into tSchema
+     repeat for each line xKey in tSchema
+          if gCSInewRequestA[xKey] is not empty then put gCSInewRequestA[xKey] into gCSIdatabaseA[gCSInewRequestA["cdbTeamID"]][gCSInewRequestA["cdbTableName"]][gCSInewRequestA["cdbRecordID"]][xKey]
+     end repeat
+     
+     --SAVE NEW/UPDATED RECORDS TO DISK
+     csi_saveRAMdatabaseToDisk gCSInewRequestA["cdbRecordID"],gCSInewRequestA["cdbTableName"],gCSInewRequestA["cdbTeamID"]
+end csi_processEmailLinkBack
+
+
+
+private function ____SYNC
+end ____SYNC
+command csi_cloudSyncIndex
+     local tResponseA
+     
+     put csi_buildSyncIndex(gCSInewRequestA["tableName"]) into tResponseA
+     put "EOF" into tResponseA["EOF"]
+     
+     --SEND CLIENT INDEX
+     get csi_writeLocalResponse(tResponseA,gCSInewRequestA["instanceResponseFolder"],gCSInewRequestA["fileName"])
+end csi_cloudSyncIndex
+
+
+
+private function ____RESPONSE
+end ____RESPONSE
+command csi_respond pResponseA
+     local tFile, tKeyList, tResponseFolder, tResultA
+     
+     --BUILD RESPONSE
+     put the keys of pResponseA into tKeyList
+     sort tKeyList ascending numeric
+     repeat for each line xKey in tKeyList
+          put pResponseA[xKey] & lf after tFile
+     end repeat
+     
+     --CLOSE LICENSE
+     put "<EOF>" after tFile
+     
+     --ENCRYPT FILE
+     put csi_encrypt(tFile,"CSIcomms") into tFile
+     
+     if gCSInewRequestA["instanceResponseFolder"] <> empty then put gCSInewRequestA["instanceResponseFolder"] into tResponseFolder
+     else put gCSIteamDataA[gCSInewRequestA["cdbTeamID"]][gCSInewRequestA["cdbTableName"]]["instanceResponseFolder"] into tResponseFolder
+     if tResponseFolder is empty then put gCSInewRequestA["cdbTableName"] & "_" & gCSInewRequestA["cdbTeamID"] into tResponseFolder
+     
+     put csi_writeLocalResponse(tFile,tResponseFolder,gCSInewRequestA["requestFileName"]) into tResultA
+end csi_respond
+
+
+function csi_writeLocalResponse pDataA,pResponseFolder,pFileName
+     local tResult, tResultA
+     
+     --ENCRYPT PACKAGE
+     put csi_encrypt(arrayEncode(pDataA),"CSIcomms") into pDataA
+     put base64Encode(pDataA) into pDataA
+     
+     --RECORD FILE SIZE OF RESPONSE
+     put the num of chars of pDataA into gLogInfoA["responseFileSize"]
+     
+     --SAVE RESPONSE
+     if there is not a folder (csi_DirectoryLocalResponses() & pResponseFolder) then \
+           create folder (csi_DirectoryLocalResponses() & pResponseFolder & slash)
+     put pDataA into URL ("file:" & csi_DirectoryLocalResponses() & pResponseFolder & slash & pFileName)
+     put the result into tResult
+     
+     if tResult is empty then
+          --UPLOAD SUCCEEDED
+          put true into tResultA["completed"]
+          put "csi_writeLocalResponse" into tResultA["context"]
+     else
+          --BACKUP RESULT TO RETURN LATER
+          put false into tResultA["completed"]
+          put "csi_writeLocalResponse" into tResultA["context"]
+          put "Upload response failed" into tResultA["response"]
+     end if
+     csi_saveResult tResultA
+     
+     return tResultA
+end csi_writeLocalResponse
+
+
+private function _____SERVER_RESET
+end _____SERVER_RESET
+command serv_resetDataServer
+     local tDataA, tTableList, tTeamIDlist
+     
+     put the keys of gCSIconfigA["Client"] into tTeamIDlist
+     repeat for each line xTeamID in (the keys of gCSIconfigA["Client"])
+          if xTeamID <> "a364ba8c-9e42-431b-bb72-3580296a4435" then delete var gCSIconfigA["Client"][xTeamID]
+     end repeat
+     
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into gCSIconfigA["Client"]["a364ba8c-9e42-431b-bb72-3580296a4435"]["cdbDataTables"]["tableDomain"]
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into gCSIconfigA["Client"]["a364ba8c-9e42-431b-bb72-3580296a4435"]["cdbDataUsers"]["tableDomain"]
+     
+     dispatch "mouseUp" to btn "Save Config"
+     csi_buildTeamDataA
+     csi_buildInternalIndexes
+     
+     --CLEAN OUT MEM DATABASE
+     delete var gCSIdatabaseA
+     
+     --DELETE DISK DATABASE
+     revDeleteFolder (csi_directoryCassiaDB() & "database")
+     
+     cdb_loadTable
+end serv_resetDataServer
+
+
+command serv_resetLiveCloudAccountsServer
+     local tTeamID, tTeamIDlist
+     
+     put the keys of gCSIconfigA["Client"] into tTeamIDlist
+     repeat for each line xTeamID in (the keys of gCSIconfigA["Client"])
+          if xTeamID <> "a364ba8c-9e42-431b-bb72-3580296a4435" and xTeamID <> "4f1306fd-7cee-4d69-af04-5424aaffb7b4" then delete var gCSIconfigA["Client"][xTeamID]
+     end repeat
+     
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into gCSIconfigA["Client"]["a364ba8c-9e42-431b-bb72-3580296a4435"]["cdbDataTables"]["tableDomain"]
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into gCSIconfigA["Client"]["a364ba8c-9e42-431b-bb72-3580296a4435"]["cdbDataUsers"]["tableDomain"]
+     
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]["cdbAccountsTables"]["tableDomain"]
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]["cdbAccountsUsers"]["tableDomain"]
+     
+     
+     dispatch "mouseUp" to btn "Save Config"
+     csi_buildTeamDataA
+     csi_buildInternalIndexes
+     
+     --CLEAN OUT MEM DATABASE
+     delete var gCSIdatabaseA
+     
+     --DELETE DISK DATABASE
+     revDeleteFolder (csi_directoryCassiaDB() & "database")
+     
+     cdb_loadTable
+end serv_resetLiveCloudAccountsServer
+
+
+private function _____CONFIG
+end _____CONFIG
+private function csi_importConfig
+     local tConfigA
+     
+     put url ("file:" & csi_DirectoryPreferences() & "config") into tConfigA
+     
+     if "authKey" is not in tConfigA then
+          try
+               --CONFIG HAVE BEEN SAVED ENCRYPTED
+               put csi_decrypt(base64Decode(tConfigA),"CSIconfig") into tConfigA
+          catch tError
+               answer "There was a problem accessing config data file. Either the file is missing or you are unable to " & \
+                     "decrypt due to not including the encryption feature in LiveCode Standalone Builder." & lf & line -2 of the executionContexts with "OK"
+          end try
+     end if
+     
+     return csi_jsonToArray(tConfigA)
+end csi_importConfig
+
+
+private function csi_jsonToArray pJson
+     local tArrayA
+     
+     repeat for each line xKey in mergJSONdecode(pJSON,"tArrayA")
+          put csi_jsonToArray(tArrayA[xKey]) into tArrayA[xKey]
+     end repeat
+     
+     return tArrayA
+end csi_jsonToArray
+
+
+private command csi_saveConfig pConfigA
+     --SOMETIMES HANDLERS WILL NOT WANT THE CONFIG VALUES TO BE RELOADED
+     --THEY HAVE SET NEW VALUES AND EXPECT THEM TO BE SAVED
+     if pConfigA is empty then put csi_importConfig() into pConfigA
+     
+     --REMOVE TEMPORARY DATA
+     delete var pConfigA["CassiaDB"]["tablesLoaded"]
+     
+     --CONVERT ARRAY TO JSON
+     put csi_ArrayToJSONsecure(pConfigA) into pConfigA
+     put base64Encode(csi_Encrypt(pConfigA,"CSIconfig")) into pConfigA
+     put pConfigA into url ("file:" & csi_DirectoryPreferences() & "config")
+     delete var pConfigA
+     
+     --REBUILD pConfigA["tablesLoaded"]
+     repeat for each key xTableID in gCSIdatabaseA
+          --LOOK UP tableName IN INDEX
+          put true into gCSIconfigA["CassiaDB"]["tablesLoaded"][gCSIindexTableNameA[xTableID]]
+     end repeat
+end csi_saveConfig
+
+
+
+private function ____ENCRYPTION
+end ____ENCRYPTION
+private function csi_encrypt pData, pType
+     switch pType
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               encrypt compress(pData) using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB AND LIVECLOUD
+               encrypt compress(pData) using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               encrypt compress(pData) using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CDBblob"
+               encrypt pData using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is not empty then return empty
+               return base64Encode(it)
+               break
+               
+          case "CDBdoc"
+               decrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_encrypt
+
+
+private function csi_decrypt pData, pType
+     switch pType
+          
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               decrypt pData using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB AND LIVECLOUD
+               decrypt pData using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               decrypt pData using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CDBblob"
+               decrypt base64Decode(pData) using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is empty then return it
+               break
+               
+          case "CDBdoc"
+               decrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_decrypt
+
+
+private function csi_MD5 pValue
+     local tRes
+     
+     get binaryDecode("H*",md5Digest("canela" && pValue),tRes)
+     return tRes
+end csi_MD5

@@ -1,0 +1,1771 @@
+﻿script "CSI_API.lib"
+//>GLOBALS
+global gCDBresultA, gCSIconfigA, gCSIdatabaseA, gCSIindexTableIDA
+global gCSIindexTableNameA, gCSIindexTeamIDA, gCSIteamDataA, gMinionsA
+
+
+on libraryStack
+     csi_debugOutput "...Loading:" && the short name of this stack
+     
+     if the long name of me is not in the long name of the target then pass libraryStack
+     if ("CDB_Starter.lib" is not in the stacksInUse) or not(csi_checkAuthentication()) then
+          --UNAUTHORIZED ENTRY
+          stop using me
+          exit to top
+     end if
+end libraryStack
+
+
+
+private function _____MINIONS
+end _____MINIONS
+command csi_engageMinions pMinonQuantity,pMinionLifeSpan,pMinionExecutablePath,pMinionName
+     local tFileList, tMinionExecutablePath, tMinionNumber
+     
+     if gMinionsA["running"] then exit csi_engageMinions
+     put true into gMinionsA["running"]
+     put 1 into tMinionNumber
+     
+     switch the platform
+          case "macos"
+               put pMinionExecutablePath into tMinionExecutablePath
+               replace "\ \" with space in tMinionExecutablePath
+               if there is a file (tMinionExecutablePath & "minion") then
+                    --FOUND MINION
+                    rename file (tMinionExecutablePath & "minion") to (tMinionExecutablePath & pMinionName & "_minion")
+               else
+                    --COULD NOT FIND MINION
+                    set the directory to tMinionExecutablePath
+                    put the files into tFileList
+                    filter tFileList with "*minion"
+                    rename file (tMinionExecutablePath & tFileList) to (tMinionExecutablePath & pMinionName & "_minion")
+               end if
+               
+               repeat pMinonQuantity
+                    get shell("open -n -a" && pMinionExecutablePath & pMinionName & "_minion" && "--args" && quote & tMinionNumber & quote && quote & \
+                          pMinionLifeSpan & quote)
+                    wait 10 milliseconds with messages
+                    add 1 to tMinionNumber
+               end repeat
+               
+               --RESET MINION FILENAME
+               set the directory to tMinionExecutablePath
+               put the files into tFileList
+               filter tFileList with "*minion"
+               rename file (tMinionExecutablePath & tFileList) to (tMinionExecutablePath & "minion")
+               break
+               
+          case "win32"
+               set the hideConsoleWindows to true
+               repeat pMinonQuantity
+                    get shell("start " & "/b" && quote & "" & quote && quote & pMinionExecutablePath & "\minion" & quote && quote & \
+                          tMinionNumber & quote & quote & pMinionExecutablePath & quote & quote & pMinionLifeSpan & quote)
+                    wait 10 milliseconds with messages
+                    add 1 to tMinionNumber
+               end repeat
+               break
+               
+          case "linux"
+               repeat pMinonQuantity
+                    --                    get shell("open -n -a" && pMinionLibraryPath & "/minion --args" && quote & tMinionNumber & quote && \
+                     --                          quote & pMinionLibraryPath & quote && quote & pMinionLifeSpan & quote)
+                    wait 10 milliseconds with messages
+                    add 1 to tMinionNumber
+               end repeat
+               break
+     end switch
+     
+     put 0 into gMinionsA["commsCounter"]
+     put true into gMinionsA["running"]
+end csi_engageMinions
+
+
+function csi_existMinions
+     local tRunningProcesses
+     
+     --RUN SHELL COMMAND TO SEE IF MINIONS ARE RUNNING
+     switch the platform
+          case "macos"
+               put shell("ps -ax") into tRunningProcesses
+               filter tRunningProcesses with "*minion*"
+               if the num of lines of tRunningProcesses > 0 then return tRunningProcesses else return false
+               break
+               
+          case "win32"
+               put shell("tasklist /fo csv") into tRunningProcesses
+               filter tRunningProcesses with "*minion*"
+               if the num of lines of tRunningProcesses > 0 then return tRunningProcesses else return false
+               break
+               
+          case "linux"
+               put shell("ps -C" && quote & "minion" & quote && "-o pid=") into tRunningProcesses
+               if the num of lines of tRunningProcesses > 0 then return tRunningProcesses else return false
+               break
+     end switch
+end csi_existMinions
+
+
+command csi_killMinions
+     local tPID, tResult, tRunningProcesses
+     
+     --ARE MININOS RUNNING
+     put csi_existMinions() into tRunningProcesses
+     put false into gMinionsA["running"]
+     
+     switch the platform
+          case "macOS"
+               repeat for each line xMinion in tRunningProcesses
+                    put word 1 of xMinion into tPID
+                    put shell("kill -9" && tPID) into tResult
+               end repeat
+               break
+               
+          case "win32"
+               repeat for each line xMinion in tRunningProcesses
+                    put item 2 of xMinion into tPID
+                    replace quote with empty in tPID
+                    put shell("taskkill /pid" && tPID && "/t /f") into tResult
+               end repeat
+               break
+               
+          case "linux"
+               repeat for each line xMinion in tRunningProcesses
+                    put shell("kill -SIGTERM" && xMinion) into tResult
+               end repeat
+               break
+     end switch
+end csi_killMinions
+
+
+command csi_feedMinions pMessage,pMinionPath,pMinionCount
+     if gMinionsA["commsCounter"] = gMinionsA["maxCount"] then
+          put 1 into gMinionsA["commsCounter"]
+     else
+          add 1 to gMinionsA["commsCounter"]
+     end if
+     if there is not a folder pMinionPath then create folder pMinionPath
+     if there is not a folder (pMinionPath & "comms/") then create folder (pMinionPath & "comms/")
+     if there is not a folder (pMinionPath & "comms/minion" & gMinionsA["commsCounter"]) then create folder (pMinionPath & "comms/minion" & gMinionsA["commsCounter"])
+     
+     put pMessage into url ("file:" & pMinionPath & "comms/minion" & gMinionsA["commsCounter"] & slash & the UUID())
+end csi_feedMinions
+
+
+command csi_verifyMinionComms pPath,pNumber
+     if there is not a folder (pPath & "/comms") then create folder (pPath & "/comms")
+     if there is not a folder (pPath & "/comms/" & ("minion" & pNumber)) then create folder (pPath & "/comms/" & ("minion" & pNumber))
+     csi_debugOutput (pPath & "/comms/minion" & pNumber) --******
+end csi_verifyMinionComms
+
+
+
+private function _____SEND_PACKAGE_TO_SERVER
+end _____SEND_PACKAGE_TO_SERVER
+command csi_sendPackageToServer pInputA,pDetailsA,pErrorBehavior
+     local tCursorBegin, tCursorEnd, tDeliverableA, tFile, tIterations
+     local tMaxTransportSize, tPackage, tPackageA, tPackageSize
+     local tResultA, tSegmentSize, tSessionID
+     
+     --FLATTEN ARRAY FOR TRANSPORT
+     put arrayEncode(pInputA) into tPackage
+     
+     --BASE64 ENCODE FILE
+     put base64Encode(tPackage) into tPackage
+     replace lf with empty in tPackage
+     
+     --BREAK THIS ARRAY UP INTO PIECES IF NEEDED
+     put the num of chars of tPackage into tPackageSize
+     put gCSIconfigA["CassiaDB"]["maxTransportSize"] into tMaxTransportSize
+     
+     --SLICE IT UP IF NEEDED
+     if tPackageSize > tMaxTransportSize then
+          --FIND LOGICAL CHUNKS
+          put tPackageSize div tMaxTransportSize into tIterations
+          if tPackageSize mod tMaxTransportSize > 0 then add 1 to tIterations
+          
+          --BREAK PACKAGE UP INTO CHUNKS
+          put 1 into tCursorBegin
+          put tPackageSize div tIterations into tSegmentSize
+          if tPackageSize mod tIterations > 0 then add tPackageSize mod tIterations to tIterations
+          put tSegmentSize into tCursorEnd
+          
+          --PUT SLICES INTO AN ARRAY
+          repeat with tArrayCursor = 1 to tIterations
+               put char tCursorBegin to tCursorEnd of tPackage into tPackageA["data"][tArrayCursor]
+               put tCursorEnd + 1 into tCursorBegin
+               put tCursorEnd + tSegmentSize into tCursorEnd
+          end repeat
+          delete var tPackage
+          
+          --SEND PACKAGE TO SERVER
+          put the UUID() into tSessionID
+          put 1 into tArrayCursor
+          
+          repeat tIterations
+               //SEND MULTI-PART PACKAGE
+               --BUILD PACKAGE ARRAY
+               put pDetailsA["requestType"] into tDeliverableA["requestType"]
+               put pDetailsA["instanceResponseFolder"] into tDeliverableA["instanceResponseFolder"]
+               put pDetailsA["teamID"] into tDeliverableA["teamID"]
+               put pDetailsA["tableName"] into tDeliverableA["tableName"]
+               put "multi" into tDeliverableA["type"]
+               put tPackageA["data"][tArrayCursor] into tDeliverableA["package"]
+               put tSessionID & "_" & tDeliverableA["teamID"] & "_" & tArrayCursor & "-" & tIterations & "_" into tDeliverableA["fileName"]
+               
+               --CORE SYSTEM VALUES
+               put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["sdkBuildDate"]),"transportDetails") into tDeliverableA["coreValues"]["sdkBuildDate"] --build date
+               put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["transportPipe"]),"transportDetails") into tDeliverableA["coreValues"]["transportPipe"] --disk, ram disk, socket
+               put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["transportFormat"]),"transportDetails") into tDeliverableA["coreValues"]["transportFormat"] --lson or json
+               put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["sdkPlatform"]),"transportDetails") into tDeliverableA["coreValues"]["sdkPlatform"] --liveCode, REST, Java
+               put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["clientAPIVersion"]),"transportDetails") into tDeliverableA["coreValues"]["clientAPIVersion"] --client API version
+               put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["serverAPIVersion"]),"transportDetails") into tDeliverableA["coreValues"]["serverAPIVersion"] --server API version
+               put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["keySizeLimit"]),"transportDetails") into tDeliverableA["coreValues"]["keySizeLimit"] --keySizeLimit
+               put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["systemVersion"]),"transportDetails") into tDeliverableA["coreValues"]["systemVersion"] --MacOS 10.11.5
+               
+               --FLATTEN ARRAY FOR TRANSPORT
+               put arrayEncode(tDeliverableA) into tFile
+               put base64Encode(csi_Encrypt(tFile,"CSIcomms")) into tFile
+               
+               --SEND REQUEST
+               --WE ARE SENDING fileName, tableName, and teamID FOR NON MINION TRANSACTIONS
+               put csi_HTTPuploadRequestSwitch(tFile,tDeliverableA) into tResultA["uploadStatus"]
+               if not tResultA["uploadStatus"] then return tResultA
+               
+               put tDeliverableA["fileName"] into tResultA["fileName"]
+               delete var tDeliverableA
+               add 1 to tArrayCursor
+          end repeat
+     else
+          //SEND SINGLE PACKAGE
+          --BUILD PACKAGE ARRAY
+          put pDetailsA["requestType"] into tDeliverableA["requestType"]
+          put pDetailsA["instanceResponseFolder"] into tDeliverableA["instanceResponseFolder"]
+          put pDetailsA["teamID"] into tDeliverableA["teamID"]
+          put pDetailsA["tableName"] into tDeliverableA["tableName"]
+          put "single" into tDeliverableA["type"]
+          put tPackage into tDeliverableA["package"]
+          put the UUID() & "_" & pDetailsA["teamID"] & "_" & tDeliverableA["requestType"] & "_" & csi_longMilliseconds() into tDeliverableA["fileName"]
+          
+          --CORE VALUES
+          put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["sdkBuildDate"]),"transportDetails") into tDeliverableA["coreValues"]["sdkBuildDate"] --build date
+          put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["transportPipe"]),"transportDetails") into tDeliverableA["coreValues"]["transportPipe"] --disk, ram disk, socket
+          put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["transportFormat"]),"transportDetails") into tDeliverableA["coreValues"]["transportFormat"] --lson or json
+          put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["sdkPlatform"]),"transportDetails") into tDeliverableA["coreValues"]["sdkPlatform"] --liveCode, REST, Java
+          put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["clientAPIVersion"]),"transportDetails") into tDeliverableA["coreValues"]["clientAPIVersion"] --client API version
+          put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["serverAPIVersion"]),"transportDetails") into tDeliverableA["coreValues"]["serverAPIVersion"] --server API version
+          put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["keySizeLimit"]),"transportDetails") into tDeliverableA["coreValues"]["keySizeLimit"] --keySizeLimit
+          put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["systemVersion"]),"transportDetails") into tDeliverableA["coreValues"]["systemVersion"] --MacOS 10.11.5
+          
+          --FLATTEN ARRAY FOR TRANSPORT
+          put arrayEncode(tDeliverableA) into tFile
+          put base64Encode(csi_Encrypt(tFile,"CSIcomms")) into tFile
+          
+          --REMOVE WEIGHT FROM tDeliverableA
+          delete var tDeliverableA["package"]
+          
+          --SEND REQUEST
+          put csi_HTTPuploadRequestSwitch(tFile,tDeliverableA) into tResultA["uploadStatus"]
+          put tDeliverableA["fileName"] into tResultA["fileName"]
+     end if
+     
+     return tResultA
+end csi_sendPackageToServer
+
+
+
+private function _____SYNC
+end _____SYNC
+function csi_buildSyncIndex pDataA
+     local tLocalIndexA, tTableID
+     
+     --INDEX RECORDS
+     repeat for each item xTableName in pDataA
+          --CONVERT tableName to tableID
+          put gCSIindexTableIDA[pDataA] into tTableID
+          
+          --CLUSTER
+          repeat for each key xCluster in gCSIdatabaseA[tTableID]
+               
+               --recordID
+               repeat for each key xRecordID in gCSIdatabaseA[tTableID][xCluster]
+                    
+                    --BUILD INDEX
+                    put gCSIdatabaseA[tTableID][xCluster][xRecordID]["csi"]["recordVersion"] into tLocalIndexA[xRecordID]
+               end repeat
+          end repeat
+     end repeat
+     
+     return tLocalIndexA
+end csi_buildSyncIndex
+
+
+
+private function _____HYPERBLOBS
+end _____HYPERBLOBS
+command csi_manageHyperBlob @rRecordA,pAction,pTableName,pTeamID
+     local tBlobID, tBlobLink, tErrorA, tHBArrayA, tInputA
+     
+     --RESET ERRORS BEFORE MANAGING HYPERBLOBS
+     put true into tErrorA["completed"]
+     put "csi_manageHyperBlob" into tErrorA["context"]
+     csi_saveResult tErrorA
+     
+     if pTableName is empty or pTeamID is empty then
+          --PATH TO HYPER-BLOB IS BROKEN
+          put false into tErrorA["completed"]
+          put "csi_manageHyperBlob" into tErrorA["context"]
+          put "Missing either pTableName or pTeamID." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     repeat for each key xKey in rRecordA
+          --ONLY FOCUS ON HYPER-BLOBS
+          if ":hyperblob" is not in xKey and lineOffset(xKey & ":HyperBlob",csi_GetSchema("advanced",pTableName,pTeamID)) = 0 then next repeat
+          
+          --USER IS TRYING TO REFERENCE KEY WITHOUT ":HypberBlob"
+          --ADJUST KEY TO HAVE FULL NAME
+          if ":hyperblob" is not in xKey then
+               put rRecordA[xKey] into rRecordA[xKey & ":HyperBlob"]
+               delete var rRecordA[xKey]
+               put (xKey & ":HyperBlob") into xKey
+          end if
+          
+          --DEV IS EITHER NOT STORING A HYPER-BLOB OR IS TRYING TO DELETE ONE
+          if rRecordA[xKey] is empty then
+               put pTableName into tInputA["cdbTableName"]
+               put xKey into tInputA["key"]
+               put rRecordA["cdbRecordID"] into tInputA["cdbRecordID"]
+               put cdb_lookUpCloudValue(tInputA) into tBlobID
+               
+               if tBlobID is empty then next repeat --JUMP OUT IF DEV IS NOT STORING ANYTHING
+               
+               --DEV WANTS TO DELETE HYPER-BLOB FROM CLOUD
+               csi_deleteHyperBlob tBlobID,pTableName,pTeamID
+               if not cdb_result() then
+                    put false into tErrorA["completed"]
+                    put "csi_manageHyperBlob" into tErrorA["context"]
+                    put ("There was a problem trying to delete a HB from key:" && xKey) into tErrorA["response"]
+               end if
+               csi_saveResult tErrorA
+               next repeat
+          end if
+          
+          switch pAction
+               case "create"
+                    switch
+                         --FILE BLOB
+                         case there is a file rRecordA[xKey]
+                              put url("binfile:" & rRecordA[xKey]) into tHBArrayA["hyperBlob"]
+                              put rRecordA[xKey] into tHBArrayA["url"]
+                              put the num of chars of tHBArrayA["hyperBlob"] into tHBArrayA["size"]
+                              put tHBArrayA into rRecordA[xKey]
+                              break
+                              
+                              --NET BLOB
+                         case char 1 to 7 of rRecordA[xKey] is "http://"
+                              put url(rRecordA[xKey]) into tHBArrayA["hyperBlob"]
+                              put rRecordA[xKey] into tHBArrayA["url"]
+                              put the num of chars of tHBArrayA["hyperBlob"] into tHBArrayA["size"]
+                              put tHBArrayA into rRecordA[xKey]
+                              break
+                              
+                              --BLOB IN VARIABLE
+                         default
+                              put rRecordA[xKey] into tHBArrayA["hyperBlob"]
+                              put tHBArrayA into rRecordA[xKey]
+                              break
+                    end switch
+                    delete var tHBArrayA
+                    put csi_UUIDtoHBID(the UUID()) into rRecordA[xKey]["UUID"]
+                    put csi_prepHyperBlobObject(rRecordA[xKey],rRecordA[xKey]["UUID"],"save",pTableName,pTeamID) into tBlobLink
+                    break
+                    
+               case "update"
+                    delete var tInputA
+                    put pTableName into tInputA["cdbTableName"]
+                    put xKey into tInputA["key"]
+                    put rRecordA["cdbRecordID"] into tInputA["cdbRecordID"]
+                    put cdb_lookUpCloudValue(tInputA) into tBlobID
+                    switch
+                         --DEV IS JUST PASSING THE SAME UUID...NO CHANGES TO HYPER-BLOB
+                         case tBlobID = rRecordA[xKey]
+                              next repeat
+                              break
+                              
+                              --CLIENT ID DELETING THE RECORD
+                         case rRecordA[xKey] is empty
+                              put csi_prepHyperBlobObject(,tBlobID,"delete",pTableName,pTeamID) into tBlobLink
+                              return empty
+                              break
+                              
+                              --STORING A HYPER-BLOB FOR THE FIRST TIME FOR THIS RECORD
+                         case tBlobID is empty and rRecordA[xKey] is not empty
+                              switch
+                                   --FILE BLOB
+                                   case there is a file rRecordA[xKey]
+                                        put url("binfile:" & rRecordA[xKey]) into tHBArrayA["hyperBlob"]
+                                        put rRecordA[xKey] into tHBArrayA["url"]
+                                        put the num of chars of tHBArrayA["hyperBlob"] into tHBArrayA["size"]
+                                        put tHBArrayA into rRecordA[xKey]
+                                        break
+                                        
+                                        --NET BLOB
+                                   case char 1 to 7 of rRecordA[xKey] is "http://"
+                                        put url(rRecordA[xKey]) into tHBArrayA["hyperBlob"]
+                                        put rRecordA[xKey] into tHBArrayA["url"]
+                                        put the num of chars of tHBArrayA["hyperBlob"] into tHBArrayA["size"]
+                                        put tHBArrayA into rRecordA[xKey]
+                                        break
+                                        
+                                        --BLOB IN VARIABLE
+                                   default
+                                        put rRecordA[xKey] into tHBArrayA["hyperBlob"]
+                                        put tHBArrayA into rRecordA[xKey]
+                                        break
+                              end switch
+                              delete var tHBArrayA
+                              
+                              put csi_UUIDtoHBID(the UUID()) into rRecordA[xKey]["UUID"]
+                              put csi_prepHyperBlobObject(rRecordA[xKey],rRecordA[xKey]["UUID"],"save",pTableName,pTeamID) into tBlobLink
+                              break
+                              
+                              --A HYPER-BLOB ALREADY EXISTS FOR THIS RECORD AND THE DEV WANTS TO OVERWRITE IT
+                         case tBlobID is not empty
+                              switch
+                                   --FILE BLOB
+                                   case there is a file rRecordA[xKey]
+                                        put url("binfile:" & rRecordA[xKey]) into tHBArrayA["hyperBlob"]
+                                        put rRecordA[xKey] into tHBArrayA["url"]
+                                        put the num of chars of tHBArrayA["hyperBlob"] into tHBArrayA["size"]
+                                        put tHBArrayA into rRecordA[xKey]
+                                        break
+                                        
+                                        --NET BLOB
+                                   case char 1 to 7 of rRecordA[xKey] is "http://"
+                                        put url(rRecordA[xKey]) into tHBArrayA["hyperBlob"]
+                                        put rRecordA[xKey] into tHBArrayA["url"]
+                                        put the num of chars of tHBArrayA["hyperBlob"] into tHBArrayA["size"]
+                                        put tHBArrayA into rRecordA[xKey]
+                                        break
+                                        
+                                        --BLOB IN VARIABLE
+                                   default
+                                        put rRecordA[xKey] into tHBArrayA["hyperBlob"]
+                                        put tHBArrayA into rRecordA[xKey]
+                                        break
+                              end switch
+                              delete var tHBArrayA
+                              
+                              put tBlobID into rRecordA[xKey]["UUID"]
+                              put csi_prepHyperBlobObject(rRecordA[xKey],rRecordA[xKey]["UUID"],"save",pTableName,pTeamID) into tBlobLink
+                              break
+                    end switch
+                    break
+          end switch
+          
+          if not cdb_Result() then
+               put false into tErrorA["completed"]
+               put "csi_manageHyperBlob" into tErrorA["context"]
+               put "There was a problem uploading blob to the server." into tErrorA["response"]
+               csi_saveResult tErrorA
+               return empty
+          end if
+          
+          set the itemDel to "@"
+          put item 1 of tBlobLink into rRecordA[xKey]
+     end repeat
+end csi_manageHyperBlob
+
+
+command csi_deleteHyperBlob pBlobID,pTableName,pTeamID
+     local tBlobLink, tErrorA
+          
+     if pTableName is empty or pTeamID is empty or pBlobID is empty then
+          --PATH TO HYPER-BLOB IS BROKEN
+          put false into tErrorA["completed"]
+          put "csi_deleteHyperBlob" into tErrorA["context"]
+          put "pTableName, pTeamID, or pBlobID is empty. These values are not being passed in your calling API." into tErrorA["response"]
+          csi_saveResult tErrorA
+          return empty
+     end if
+     
+     put csi_prepHyperBlobObject(,pBlobID,"delete",pTableName,pTeamID) into tBlobLink
+     if not cdb_Result() then
+          --PATH TO HYPER-BLOB IS BROKEN
+          put false into tErrorA["completed"]
+          put "csi_deleteHyperBlob" into tErrorA["context"]
+          put "There was a problem deleting the blob from bucket." into tErrorA["response"]
+          
+          csi_saveResult tErrorA
+          return empty
+     end if
+end csi_deleteHyperBlob
+
+
+private function csi_prepHyperBlobObject pBlobA,pBlobID,pAction,pTableName,pTeamID
+     local tFileName, tFoundLine, tResultA
+     
+     --BE SURE TO GET PROPER CASE OF pTableName
+     put lineOffset(pTableName,(the keys of gCSIteamDataA[pTeamID])) into tFoundLine
+     put line tFoundLine of the keys of gCSIteamDataA[pTeamID] into pTableName
+     
+     if pAction is not "delete" then
+          if pBlobA is an array then
+               --USER IS SAVING ADVANCED HYPERBLOB
+               put arrayEncode(pBlobA) into pBlobA
+          end if
+          
+          --ENCRYPT FILE
+          put csi_encrypt(pBlobA,"CDBblob") into pBlobA
+     end if
+     
+     --GENERATE A UUID FOR THIS FILE
+     put pBlobID & "@" & pTableName & "-" & pTeamID into tFileName
+     
+     --SEND REQUEST
+     put csi_HTTPuploadHyperBlob(pBlobA,tFileName,pAction,pTableName,pTeamID) into tResultA
+     if not cdb_result() then return empty
+     
+     --RETURN ONLY THE UUID PORTION OF THE LINK
+     return tFileName
+end csi_prepHyperBlobObject
+
+
+private function csi_UUIDtoHBID pUUID
+     if not cdb_isValidRecordID(pUUID) then return "error" //INPUT WAS NOT VALID UUID
+     replace "-" with empty in pUUID
+     put binaryEncode("h*",pUUID) into pUUID
+     put base64Encode(pUUID) into pUUID
+     replace "=" with empty in pUUID
+     replace lf with empty in pUUID
+     replace "+" with "-" in pUUID
+     replace "/" with "~" in pUUID
+     return pUUID
+end csi_UUIDtoHBID
+
+
+private function csi_HBIDtoUUID pBlobID
+     put "==" after pBlobID
+     replace "~" with "/" in pBlobID
+     replace "-" with "+" in pBlobID
+     put base64Decode(pBlobID) into pBlobID
+     put binaryDecode("h*",pBlobID,pBlobID) into pBlobID
+     put "-" before char 9 of pBlobID
+     put "-" before char 14 of pBlobID
+     put "-" before char 19 of pBlobID
+     put "-" before char 24 of pBlobID
+     if not cdb_isValidRecordID(pBlobID) then return "error" //INPUT WAS NOT VALID HBID
+     return pBlobID
+end csi_HBIDtoUUID
+
+
+
+private function _____INDEX
+end _____INDEX
+command csi_buildInternalIndexes
+     csi_buildTableNameToTableIDIndexA
+     csi_buildTableIDToTableNameIndexA
+     csi_buildTableIDToTeamIDindexA
+end csi_buildInternalIndexes
+
+
+command csi_buildTableNameToTableIDIndexA
+     delete var gCSIindexTableIDA
+     repeat for each key xTeamID in gCSIteamDataA
+          repeat for each key xTableName in gCSIteamDataA[xTeamID]
+               put gCSIteamDataA[xTeamID][xTableName]["tableID"] into gCSIindexTableIDA[xTableName]
+          end repeat
+     end repeat
+end csi_buildTableNameToTableIDIndexA
+
+
+command csi_buildTableIDToTableNameIndexA
+     delete var gCSIindexTableNameA
+     repeat for each key xTeamID in gCSIteamDataA
+          repeat for each key xTableName in gCSIteamDataA[xTeamID]
+               put xTableName into gCSIindexTableNameA[gCSIteamDataA[xTeamID][xTableName]["tableID"]]
+          end repeat
+     end repeat
+end csi_buildTableIDToTableNameIndexA
+
+
+command csi_buildTableIDToTeamIDindexA
+     delete var gCSIindexTeamIDA
+     repeat for each key xTeamID in gCSIteamDataA
+          repeat for each key xTableName in gCSIteamDataA[xTeamID]
+               put xTeamID into gCSIindexTeamIDA[gCSIteamDataA[xTeamID][xTableName]["tableID"]]
+          end repeat
+     end repeat
+end csi_buildTableIDToTeamIDindexA
+
+
+
+private function _____CURRENT_USER_INFO
+end _____CURRENT_USER_INFO
+command csi_buildTeamDataA
+     local tConfigA
+     
+     delete var gCSIteamDataA
+     put csi_importConfig() into tConfigA
+     
+     put tConfigA["Client"] into gCSIteamDataA
+     
+     --LOAD IN CLIENT DATA
+     repeat for each key xTeamID in gCSIteamDataA
+          repeat for each key xTableName in gCSIteamDataA[xTeamID]
+               put tConfigA["Client"][xTeamID][xTableName]["instanceName"] into gCSIteamDataA[xTeamID][xTableName]["instanceRequestFolder"]
+               put tConfigA["Client"][xTeamID][xTableName]["instanceName"] & "_" & xTeamID into gCSIteamDataA[xTeamID][xTableName]["instanceResponseFolder"]
+          end repeat
+     end repeat
+end csi_buildTeamDataA
+
+
+function csi_getSchema pForm, pTableName, pTeamID
+     local tSchemaA
+     
+     //SKIP ERROR CHECKING FOR INTERNAL CALLS
+     
+     --RAW: ENTIRE SCHEMA, COMMA DELIMITED
+     --ADVANCED: DEV SCHEMA PLUS ALL CDB KEYS
+     --BASIC: DEV SCHEMA
+     
+     put gCSIteamDataA[pTeamID][pTableName]["devKeys"] into tSchemaA["devKeys"]
+     put gCSIteamDataA[pTeamID][pTableName]["internalKeys"] into tSchemaA["internalKeys"]
+     
+     switch pForm
+          case "raw"
+               --RETURNS ENTIRE SCHEMA
+               return tSchemaA["internalKeys"] & comma & tSchemaA["devKeys"]
+               break
+               
+          case "advanced"
+               --RETURNS LINE DELIMITED LIST OF DEV AND INTERNAL KEYS
+               replace comma with lf in tSchemaA["devKeys"]
+               replace comma with lf in tSchemaA["internalKeys"]
+               return tSchemaA["devKeys"] & lf & tSchemaA["internalKeys"]
+               break
+               
+          case "internal"
+               --RETURNS INTERNAL SCHEMA
+               replace comma with lf in tSchemaA["internalKeys"]
+               return tSchemaA["internalKeys"]
+               break
+               
+          case "basic"
+          default
+               --RETURNS USER'S SCHEMA
+               replace comma with lf in tSchemaA["devKeys"]
+               return tSchemaA["devKeys"]
+               break
+     end switch
+end csi_getSchema
+
+
+
+private function _____DATABASE_LOAD_SAVE
+end _____DATABASE_LOAD_SAVE
+command csi_saveRAMToDisk pRecordClustersA,pTableID
+     local tErrorA, tFailedSaveRecords, tPath, tResultA, tSuccessfullySavedRecords
+          
+     put empty into tFailedSaveRecords
+     put empty into tSuccessfullySavedRecords
+     
+     if pRecordClustersA is empty then
+          put false into tResultA["completed"]
+          put "Missing pRecordID" into tResultA["response"]
+          put "csi_saveRAMToDisk" into tErrorA["context"]
+          csi_saveResult tErrorA
+          exit csi_saveRAMToDisk
+     end if
+     
+     put true into tResultA["completed"]
+     put "csi_saveRAMToDisk" into tResultA["context"]
+     
+     --USE SHELL TO DELETE THE TABLE
+     if pRecordClustersA is "*" then
+          put csi_directoryTable(pTableID) into tPath
+          
+          switch the platform
+               case "macos"
+               case "linux"
+                    replace space with "\ " in tPath
+                    get shell("rm -rf" && tPath)
+                    break
+                    
+               case "win32"
+                    break
+          end switch
+          
+          --HANDLE ERRORS
+          if the result is not empty then
+               put false into tResultA["completed"]
+               put "Unable delete table using shell" into tResultA["response"]
+               put "csi_saveRAMToDisk" into tErrorA["context"]
+               csi_saveResult tErrorA
+               exit csi_saveRAMToDisk
+          end if
+          
+     else
+          --DEV IS WORKING ON EITHER A SINGLE OR MULTI LINE LIST OF CLUSTERS
+          repeat for each key xRecordCluster in pRecordClustersA
+               --DELETE FULL CLUSTER BECAUSE CLUSTER IS EMPTY IN gCSIdatabaseA
+               if gCSIdatabaseA[pTableID][xRecordCluster] is empty then
+                    delete file csi_directoryTable(pTableID) & xRecordCluster
+               else
+                    --SAVE RECENLTY UPDATED CLUSTER TO DISK CACHE
+                    put base64Encode(csi_encrypt(arrayEncode(gCSIdatabaseA[pTableID][xRecordCluster]),"CDBdoc")) into URL ("file:" & csi_directoryTable(pTableID) & xRecordCluster)
+                    
+                    --HANDLE ERRORS
+                    if the result is not empty then
+                         --RECORD FAILED TO SAVE TO DISK
+                         put xRecordCluster & lf after tFailedSaveRecords
+                    else
+                         --RECORD STORED TO DISK SUCCESSFULLY
+                         put xRecordCluster & lf after tSuccessfullySavedRecords
+                    end if
+               end if
+          end repeat
+     end if
+     
+     --ONE OR MORE RECORDS FAILED TO SAVE
+     if tFailedSaveRecords is not empty then
+          put "false" into tErrorA["completed"]
+          put "Records could not be cached or removed to local disk" into tErrorA["response"]
+          put "csi_saveRAMToDisk" into tResultA["context"]
+          csi_saveResult tErrorA
+          
+          return tFailedSaveRecords
+     end if
+     
+     csi_saveResult tResultA
+end csi_saveRAMToDisk
+
+
+command csi_loadTable pInputA
+     local tCallBackDataA, tCount, tCounter, tCurrentRecordA, tErrorA
+     local tIncrementor, tMissingTablesList, tMultiplier, tRecordClusters
+     local tRecordListA, tTableID, tTeamID
+     
+     --ERROR LOG
+     put false into tErrorA["completed"]
+     put "csi_loadTable" into tErrorA["context"]
+     put "csi_loadTable starting" into tErrorA["response"]
+     
+     --VALIDATE CLIENT IDS BECAUSE HACKERS MIGHT TRY TO INJECT CLIENT IDS PRIOR TO RUNNING THIS COMMAND
+     --THIS IS ALREADY DONE IN STARTER, SO WHY DO IT AGAIN?
+     --MAKE SURE WE GET THE MOST UP-TO-DATE DATA
+     if not pInputA["internalUse"] then --INTERNAL USE SHOULD NOT DO THIS SECURITY MEASURE. WILL CAUSE PROBLEMS.
+          csi_loadConfig --UPDATES CONFIG
+          csi_buildTeamDataA --UPDATES KEY INTERNAL VARIABLES
+     end if
+          
+     --WHICH TABLES DO WE NEED TO LOAD
+     switch pInputA["cdbTableName"]
+          case "*"
+               --FRESH START: DELETE DATABASE VARIABLE AND LOAD ALL TABLES AGAIN
+               delete var gCSIdatabaseA
+               
+               --BUILD A LIST OF ALL THE AVAILABLE tableNames
+               put empty into pInputA["cdbTableName"]
+               repeat for each key xTeamID in gCSIteamDataA
+                    put the keys of gCSIteamDataA[xTeamID] & lf after pInputA["cdbTableName"]
+               end repeat
+               filter pInputA["cdbTableName"] without empty
+               break
+               
+          case empty
+               --LOAD ONLY TABLES THAT HAVE NOT BEEN LOADED PREVIOUSLY
+               --BUILD A LIST OF ALL THE AVAILABLE tableNames
+               repeat for each key xTeamID in gCSIteamDataA
+                    put the keys of gCSIteamDataA[xTeamID] & lf after pInputA["cdbTableName"]
+               end repeat
+               filter pInputA["cdbTableName"] without empty
+               
+               repeat for each line xTableName in pInputA["cdbTableName"]
+                    --GET teamID FOR EACH tableName
+                    put gCSIindexTableIDA[xTableName] into tTableID
+                    put gCSIindexTeamIDA[tTableID] into tTeamID
+                    
+                    if xTableName is not in the keys of gCSIconfigA["CassiaDB"]["tablesLoaded"] then put xTableName & lf after tMissingTablesList
+               end repeat
+               put tMissingTablesList into pInputA["cdbTableName"]
+               break
+               
+          default
+               --LOAD ONLY THOSE TABLES DEV WANTS TO LOAD
+               --REMOVE RECORDS FROM gCSIdatabaseA VARIABLE THAT ARE ABOUT TO BE LOADED AGAIN
+               repeat for each line xTableName in pInputA["cdbTableName"]
+                    
+                    --GET teamID FOR EACH tableName
+                    put gCSIindexTableIDA[xTableName] into tTableID
+                    put gCSIindexTeamIDA[tTableID] into tTeamID
+                    
+                    --REMOVE EXISTING DATA FROM RAM BEFORE LOADING TABLE AGAIN
+                    if xTableName is in the keys of gCSIdatabaseA[tTeamID] then delete var gCSIdatabaseA[tTeamID][xTableName]
+               end repeat
+               break
+     end switch
+     
+     repeat for each line xTableName in pInputA["cdbTableName"]
+          put gCSIindexTableIDA[xTableName] into tTableID
+          put gCSIindexTeamIDA[tTableID] into tTeamID
+          put true into gCSIconfigA["CassiaDB"]["tablesLoaded"][xTableName] --TEMPORARILY SET THIS VALUE TO WORK IN csi_checkContext
+          if not(csi_checkContext("csi_loadTable",xTableName,tTeamID)) then 
+               put false into gCSIconfigA["CassiaDB"]["tablesLoaded"][xTableName] --RESET THIS VALUE
+               return empty //INVALID TeamID, tableName, OR BOTH
+          end if
+          put false into gCSIconfigA["CassiaDB"]["tablesLoaded"][xTableName] --RESET THIS VALUE
+     end repeat 
+     
+     --DEV IS SENDING A STRING VALUE
+     --USE EXECUTION CONTEXTS TO FIGURE OUT WHERE THE MESSAGE CAME FROM
+     if pInputA["callBack"] is not an array then
+          --THIS CAN ONLY HAPPEN IF THE CSI IS BEING CALLED DIRECTLY
+          put pInputA["callBack"] into pInputA["callBack"]["handler"]
+          put item 1 of the executionContexts into pInputA["callBack"]["control"]
+     else
+          --DEV WANTS TO SEND THE CALLBACK TO OTHER LOCATION
+          --LET IT RIDE
+     end if
+     
+     
+     --LOAD TABLES
+     put 0 into tCallBackDataA["loadedTotal"]
+     put 0 into tCallBackDataA["recordTotal"]
+     
+     --CALCUALTE ALL THE RECORD TOTALS FOR EACH OF THE TABLES TO BE LOADED
+     repeat for each line xTableName in pInputA["cdbTableName"]
+          --pTableID,pRecordChunk
+          --WALK THROUGH ALL THE recordFolderCluster IN tableID FOLDER
+          if gCSIindexTableIDA[xTableName] is not empty then
+               set the directory to csi_directoryTable(cdb_getTableID(xTableName))
+               put the files into tRecordListA[xTableName]
+               filter tRecordListA[xTableName] without ".*"
+               add the num of lines of tRecordListA[xTableName] to tCallBackDataA["recordTotal"]
+          end if
+     end repeat
+     
+     --WORK THROUGH EACH TABLE AND LOAD THE RECORDS
+     repeat for each line xTableName in pInputA["cdbTableName"]
+          put the num of lines of tRecordListA[xTableName] into tCallBackDataA["recordSubTotal"]
+          put xTableName into tCallBackDataA["tableName"]
+          
+          --PRE-GENERATE 10% VALUES
+          put tCallBackDataA["recordSubTotal"] div 10 into tMultiplier
+          put 1 into tCount
+          put empty into tIncrementor
+          repeat 10
+               put (tMultiplier * tCount) & lf after tIncrementor
+               add 1 to tCount
+          end repeat
+          
+          --GET LIST OF RECORD CLUSTERS
+          set the directory to csi_directoryTable(gCSIindexTableIDA[xTableName])
+          put the files into tRecordClusters
+          
+          --WALK THROUGH EACH RECORD CLUSTER
+          repeat for each line xRecordCluster in tRecordClusters
+               add 1 to tCallBackDataA["loadedTotal"]
+               add 1 to tCounter
+               
+               --SEND CALL BACKS
+               --recordTotal: total quantity of reccords to load
+               --recordSubTotal: quantity of records to load for current table being loaded
+               --databaseName: current table being loaded
+               --loadedTotal: number of records loaded, considering all tables
+               --loadedSubTotal: number of records loaded, considering only current table being loaded
+               
+               if pInputA["callBack"] is not empty and tCallBackDataA["recordSubTotal"] > 0 then
+                    if tCounter is among the lines of tIncrementor then
+                         put tCounter into tCallBackDataA["loadedSubTotal"]
+                         dispatch pInputA["callBack"]["handler"] to pInputA["callBack"]["control"] with tCallBackDataA
+                    end if
+               end if
+               
+               --LOAD CLUSTER INTO MEMORY
+               put gCSIindexTableIDA[xTableName] into tTableID
+               put gCSIindexTeamIDA[tTableID] into tTeamID
+               get URL ("file:" & csi_directoryTable(gCSIteamDataA[tTeamID][xTableName]["tableID"]) & xRecordCluster)
+               
+               try
+                    get arrayDecode(csi_decrypt(it,"CDBdoc"))
+               catch tError
+                    //THE RECORD WAS EITHER NOT DECRYPTABLE, OR IT WAS MISSING A MATCHING RECORD_ID
+                    delete file (csi_directoryTable(gCSIteamDataA[tTeamID][xTableName]["tableID"]) & xRecordCluster)
+               end try
+               
+               --STORE LOADED DATA INTO gCSIdatabaseA
+               repeat for each key xRecordID in it
+                    put it[xRecordID] into gCSIdatabaseA[gCSIteamDataA[tTeamID][xTableName]["tableID"]] [xRecordCluster] [xRecordID]
+               end repeat
+               
+               delete var tCurrentRecordA
+          end repeat
+          
+          --SEND FINAL CALLBACK
+          if pInputA["callBack"] is not empty and tCallBackDataA["recordSubTotal"] > 0 then
+               put tCallBackDataA["recordSubTotal"] into tCallBackDataA["loadedSubTotal"]
+               dispatch pInputA["callBack"]["handler"] to pInputA["callBack"]["control"] with tCallBackDataA
+          end if
+          
+          --SET tablesLoaded IN gCSIconfigA
+          put true into gCSIconfigA["CassiaDB"]["tablesLoaded"][xTableName]
+     end repeat
+     
+     put true into tErrorA["completed"]
+     put empty into tErrorA["response"]
+     put "csi_loadTable" into tErrorA["context"]
+     csi_saveResult tErrorA
+end csi_loadTable
+
+
+command csi_unloadTable pInputA
+     local tTeamID
+     
+     put cdb_getTeamID(pInputA["cdbTableName"]) into tTeamID
+     
+     --WHICH TABLES DO WE NEED TO UNLOAD
+     if pInputA["cdbTableName"] is "*" or pInputA["cdbTableName"] is empty then
+          delete var gCSIdatabaseA
+          delete var gCSIconfigA["CassiaDB"]["tablesLoaded"]
+     else
+          repeat for each line xTableName in pInputA["cdbTableName"]
+               delete var gCSIdatabaseA[tTeamID][xTableName]
+               put false into gCSIconfigA["CassiaDB"]["tablesLoaded"][xTableName]
+          end repeat
+     end if
+end csi_unloadTable
+
+
+command csi_deleteTable @rArrayA
+     local tTeamID
+     
+     --DELETE TABLE ON DISK
+     deleteFolder csi_directoryTable(gCSIindexTableIDA[rArrayA["cdbTableName"]])
+     
+     --DELETE TABLE IN RAM
+     delete var gCSIdatabaseA[gCSIindexTableIDA[rArrayA["cdbTableName"]]]
+     
+     --UPDATE CONFIG FILE WITHOUT THIS TABLE
+     put gCSIindexTeamIDA[gCSIindexTableIDA[rArrayA["cdbTableName"]]] into tTeamID
+     delete var gCSIconfigA["Client"][tTeamID][rArrayA["cdbTableName"]]
+     
+     --SAVE UPDATED CONFIG FILE
+     csi_saveConfig gCSIconfigA
+     
+     --REBUILD gCSIteamDataA
+     csi_buildTeamDataA
+end csi_deleteTable
+
+
+
+command csi_setupConfigForAccountsAccess
+     local tLiveCloudAccounts, tInputA
+     
+     put "Bg0AAAACABFjZGJBY2NvdW50c1RhYmxlcw0AAAAHAAxpbnRlcm5hbEtleXMIAC1jZGJUZWFtSUQsY2RiUmVjb3JkSUQsY2RiVGFibGVJRCxjZGJUYWJsZU5hbWUABW5vdGVzCAAgTGl2ZUN" & \
+           "sb3VkQWNjb3VudHMgc2VydmVyIGRldGFpbHMAB2RldktleXMGAHp0YWJsZU5hbWUsdGVhbUlELHRhYmxlSUQsdXNlcklELHRhYmxlRG9tYWluLGluc3RhbmNlUmVzcG9uc2VGb2xkZXIs" & \
+           "aW5zdGFuY2VSZXF1ZXN0Rm9sZGVyLGluc3RhbmNlTmFtZSxrZXlTaXplTGltaXQsZGV2S2V5cwAGdGVhbUlECAAkNGYxMzA2ZmQtN2NlZS00ZDY5LWFmMDQtNTQyNGFhZmZiN2I0AAxpb" & \
+           "nN0YW5jZU5hbWUIABFMaXZlQ2xvdWRBY2NvdW50cwAHdGFibGVJRAgAJGVkMGQ4YTVmLWZlYjMtNDc5Yy1hZjJmLTZiMDA2OGJhMGMyZgALdGFibGVEb21haW4GAA9sb2NhbGhvc3Q6ND" & \
+           "kxNTkAEGNkYkFjY291bnRzVXNlcnMNAAAABwAMaW50ZXJuYWxLZXlzCAAtY2RiVGVhbUlELGNkYlJlY29yZElELGNkYlRhYmxlSUQsY2RiVGFibGVOYW1lAAVub3RlcwgAIExpdmVDbG9" & \
+           "1ZEFjY291bnRzIHNlcnZlciBkZXRhaWxzAAdkZXZLZXlzCAA9dGVhbUlELGVtYWlsLHBhc3N3b3JkLGZpcnN0TmFtZSxsYXN0TmFtZSxhdXRoS2V5LGxpbmtUb1RhYmxlcwAGdGVhbUlE" & \
+           "CAAkNGYxMzA2ZmQtN2NlZS00ZDY5LWFmMDQtNTQyNGFhZmZiN2I0AAxpbnN0YW5jZU5hbWUIABFMaXZlQ2xvdWRBY2NvdW50cwAHdGFibGVJRAgAJGFmNWMxNTljLTkwZGYtNDhlNy04Z" & \
+           "mU0LTY2M2YwNGIyMzIxYQALdGFibGVEb21haW4GAA9sb2NhbGhvc3Q6NDkxNTk=" into tLiveCloudAccounts
+          
+     put arrayDecode(base64Decode(tLiveCloudAccounts)) into gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]["cdbAccountsTables"]["tableDomain"]
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into gCSIconfigA["Client"]["4f1306fd-7cee-4d69-af04-5424aaffb7b4"]["cdbAccountsUsers"]["tableDomain"]
+     
+     csi_saveConfig gCSIconfigA
+     csi_buildTeamDataA
+     csi_buildInternalIndexes
+     
+     put true into tInputA["internalUse"]
+     cdb_loadTable tInputA
+end csi_setupConfigForAccountsAccess
+
+
+command csi_setupConfigForDataAccess
+     local tDataServer, tInputA
+     
+     put "Bg0AAAACAA1jZGJEYXRhVGFibGVzDQAAAAcADGludGVybmFsS2V5cwgALWNkYlRlYW1JRCxjZGJSZWNvcmRJRCxjZGJUYWJsZUlELGNkYlRhYmxlTmFtZQAFbm90ZXMIABVDYXJib24gc2V" & \
+           "ydmVyIGRldGFpbHMAB2RldktleXMIAHN0YWJsZU5hbWUsdGFibGVJRCx1c2VySUQsdGFibGVEb21haW4saW5zdGFuY2VSZXNwb25zZUZvbGRlcixpbnN0YW5jZVJlcXVlc3RGb2xkZXIsa" & \
+           "W5zdGFuY2VOYW1lLGtleVNpemVMaW1pdCxkZXZLZXlzAAZ0ZWFtSUQIACRhMzY0YmE4Yy05ZTQyLTQzMWItYmI3Mi0zNTgwMjk2YTQ0MzUADGluc3RhbmNlTmFtZQgABkNhcmJvbgAHdGFi" & \ 
+           "bGVJRAgAJGVkMGQ4YTVmLWZlYjMtNDc5Yy1hZjJmLTZiMDA2OGJhMGMyZgALdGFibGVEb21haW4GAA9sb2NhbGhvc3Q6NDkxNTkADGNkYkRhdGFVc2Vycw0AAAAHAAxpbnRlcm5hbEtleXMIAC1j" & \ 
+           "ZGJUZWFtSUQsY2RiUmVjb3JkSUQsY2RiVGFibGVJRCxjZGJUYWJsZU5hbWUABW5vdGVzCAAVQ2FyYm9uIHNlcnZlciBkZXRhaWxzAAdkZXZLZXlzCAA9dGVhbUlELGVtYWlsLHBhc3N3b3JkLGZ" & \
+           "pcnN0TmFtZSxsYXN0TmFtZSxhdXRoS2V5LGxpbmtUb1RhYmxlcwAGdGVhbUlECAAkYTM2NGJhOGMtOWU0Mi00MzFiLWJiNzItMzU4MDI5NmE0NDM1AAxpbnN0YW5jZU5hbWUIAAZDYXJib24" & \
+           "AB3RhYmxlSUQIACQwOGM3ZTAxYy0wZGNjLTRiZDYtYjBlOS0wNmY4ZTUwOWEwOWYAC3RhYmxlRG9tYWluBgAPbG9jYWxob3N0OjQ5MTU5" into tDataServer
+     
+     put arrayDecode(base64Decode(tDataServer)) into gCSIconfigA["Client"]["a364ba8c-9e42-431b-bb72-3580296a4435"]
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into gCSIconfigA["Client"]["a364ba8c-9e42-431b-bb72-3580296a4435"]["cdbDataTables"]["tableDomain"]
+     put gCSIconfigA["Server"]["NewAccount"]["tableDomain"] into gCSIconfigA["Client"]["a364ba8c-9e42-431b-bb72-3580296a4435"]["cdbDataUsers"]["tableDomain"]
+     
+     csi_saveConfig gCSIconfigA
+     csi_buildTeamDataA
+     csi_buildInternalIndexes
+     
+     put true into tInputA["internalUse"]
+     cdb_loadTable tInputA
+end csi_setupConfigForDataAccess
+     
+
+
+private function _____TOOLS
+end _____TOOLS
+function csi_longMilliseconds
+     local tMStime
+     
+     put the long milliseconds into tMStime
+     replace "." with empty in tMStime
+     return tMStime
+end csi_longMilliseconds
+
+
+function csi_isMultidimentionalArray pInputA
+     local tKeys1, tKeys2
+     
+     if pInputA is not an array then return false
+     
+     put the keys of pInputA into tKeys1
+     put the keys of pInputA[line 1 of tKeys1] into tKeys2
+     if tKeys2 is not empty then return true else return false
+end csi_isMultidimentionalArray
+
+
+function csi_generateMiToken pEmail
+     local tToken
+     
+     -- CREATE A TOKEN FOR PHP VALIDATION
+     put pEmail into tToken
+     put char 1 of tToken after tToken
+     put "CanelaSoftwareDBHash" into char 1 of tToken
+     replace "@" with "#" in tToken
+     put sha1Digest(tToken) into tToken
+     get binaryDecode("H*",tToken,tToken)
+     return tToken
+end csi_generateMiToken
+
+
+
+private function _____OUTPUT_ERRORS
+end _____OUTPUT_ERRORS
+command csi_resetResult
+     put empty into gCDBresultA["recent"]
+end csi_resetResult
+
+
+command csi_saveResult pResultA
+     if pResultA["completed"] is empty then put "undefined" into pResultA["completed"]
+     
+     put csi_VerboseTime() into gCDBresultA["date"]
+     put gCDBresultA["date"] into pResultA["date"]
+     put pResultA into gCDBresultA["recent"]
+     put csi_logError() after gCDBresultA["log"]
+     
+     if the num of lines of gCDBresultA["log"] > 256 then \
+           put line -64 to -1 of gCDBresultA["log"] into gCDBresultA["log"] --PRUNE THE LOG IF IT GETS TOO BIG
+     
+     if "message box" is among the items of gCDBresultA["errorOutput"] then \
+           if "response" is among the keys of gCDBresultA["recent"] and gCDBresultA["recent"]["response"] is not empty then \
+           if the environment is "development" then put "Error (" & csi_verboseTime() & "):" && gCDBresultA["recent"]["response"]
+end csi_saveResult
+
+
+function csi_result pParam
+     local tResultA
+     
+     --DEVELOPERS CALL THIS TO RETRIEVE ERRORS
+     switch
+          case pParam is empty --LOG
+               return ((gCDBresultA["recent"]["completed"]) or \
+                     (gCDBresultA["recent"]["completed"] is empty))
+               break
+          case pParam is in the keys of gCDBresultA --PRIMARY KEYS
+               return gCDBresultA[pParam]
+               break
+          case pParam is in the keys of gCDBresultA["recent"] --RECENT DATA
+               return gCDBresultA["recent"][pParam]
+               break
+          default --DEVELOPER WANTS ALL DATA RETURNED
+               put gCDBresultA["recent"] into tResultA
+               delete var tResultA["errorOutput"] --REMOVE UNNECESSARY DATA
+               return tResultA
+               break
+     end switch
+end csi_result
+
+
+private function csi_logError
+     local tErrorHistory
+     
+     put csi_VerboseTime() & lf after tErrorHistory
+     put gCDBresultA["recent"]["context"] & lf after tErrorHistory
+     put gCDBresultA["recent"]["completed"] & lf after tErrorHistory
+     put gCDBresultA["recent"]["response"] & lf after tErrorHistory
+     put "- - - - - - - - - -" & lf after tErrorHistory
+     filter tErrorHistory without empty
+     return tErrorHistory
+end csi_logError
+
+
+command csi_logToDisk pMessage
+     local tChar, tCounter, tDoc, tFileSize, tLogPath, tLogURL
+     local tMessage, tOrigDir, tTimestamp
+     
+     --PARSE ARRAYS OUT IF NEEDED
+     if pMessage is an array then
+          repeat for each key xKey in pMessage
+               put pMessage[xKey] & lf after tMessage
+          end repeat
+          filter tMessage without empty
+          put tMessage into pMessage
+     end if
+     
+     put the directory into tOrigDir
+     
+     --BUILD LOG URL
+     put ("file:" & csi_directoryDesktop() & slash & "CassiaDBLog.txt") into tLogURL
+     put csi_directoryDesktop() & slash & quote & "CassiaDBLog.txt" & quote into tLogPath
+     
+     --CHECK FILE SIZE OF LOG
+     put URL ("file:" & csi_directoryDesktop() & slash & "CassiaDBLog.txt") into tDoc
+     put the num of chars of tDoc into tFileSize
+     csi_CleanServerLogs tFileSize,tLogPath
+     
+     --CREATE TIMESTAMP
+     put csi_VerboseTime() & ": " into tTimestamp
+     
+     if char 5 of pMessage = "#" then put (lf & lf & lf) before pMessage --PREPEND MAJOR SECTIONS WITH LF*3
+     
+     put 1 into tCounter
+     repeat (the num of chars of pMessage)
+          put char tCounter of pMessage into tChar
+          if tChar is not lf and tChar is not cr and tChar is not lf then
+               put tTimestamp before char tCounter of pMessage --PUT THE TIMESTAMP AFTER THE SPACES, AND BEFORE THE CONTENT
+               exit repeat
+          end if
+          add 1 to tCounter
+     end repeat
+     
+     --WRITE TO THE LOG
+     put (pMessage & lf) after URL tLogURL
+     
+     set the directory to tOrigDir
+end csi_logToDisk
+
+
+
+private command _____QUERY_HELPERS
+end _____QUERY_HELPERS
+function csi_dateItemsCompare pTarget, pQuery, pOperator
+     local tItemCounter
+     
+     //MERGE THE TARGET INTO THE QUERY
+     put 0 into tItemCounter
+     repeat 7
+          add 1 to tItemCounter
+          if item tItemCounter of pQuery = 0 then put item tItemCounter of pTarget into item tItemCounter of pQuery
+     end repeat
+     convert pQuery to seconds
+     convert pTarget to seconds
+     
+     if pOperator is "=" then return (pTarget = pQuery)
+     if pOperator is "!=" or pOperator is "<>" then return (pTarget <> pQuery)
+     if pOperator is ">" then return (pTarget > pQuery)
+     if pOperator is "<" then return (pTarget < pQuery)
+     if pOperator is "<=" then return (pTarget <= pQuery)
+     if pOperator is ">=" then return (pTarget >= pQuery)
+     return empty //UNKNOWN OPERATOR
+end csi_dateItemsCompare
+
+
+function csi_isDateItems pDateItems
+     return (the num of items of pDateItems = 7) //KEEP IT SHORT, FOR SPEED; RUNS 4X PER KEY
+end csi_isDateItems
+
+
+function csi_convertQueryOperator pOperator
+     switch pOperator
+          case ":"
+          case "is in"
+          case "contains"
+               put "~" into pOperator
+               break
+          case "!:"
+          case "is not in"
+          case "does not contain"
+               put "!~" into pOperator
+               break
+          case "begins with"
+          case "starts with"
+               put "[" into pOperator
+               break
+          case "ends with"
+          case "finishes with"
+               put "]" into pOperator
+               break
+          case "equal to"
+          case "equals"
+          case "is"
+               put "=" into pOperator
+               break
+          case "<>"
+          case "not equal to"
+          case "does not equal"
+          case "is not"
+               put "!=" into pOperator
+               break
+          case "greater than"
+          case "gt"
+               put ">" into pOperator
+               break
+          case "greater than or equal to"
+          case "ge"
+               put ">=" into pOperator
+               break
+          case "less than"
+          case "lt"
+               put "<" into pOperator
+               break
+          case "less than or equal to"
+          case "le"
+               put "<=" into pOperator
+               break
+          case "matchText"
+               put "regex" into pOperator
+               break
+          case "date<>"
+               put "date!=" into pOperator
+               break
+          case "~"
+          case "!~"
+          case "["
+          case "]"
+          case "="
+          case "!="
+          case ">"
+          case ">="
+          case "<"
+          case "<="
+          case "filter"
+          case "regex"
+          case "date>"
+          case "date<"
+          case "date<="
+          case "date>="
+          case "date="
+          case "date!="
+               //NO MODIFICATIONS NECESSARY - ALREADY CORRECT
+               break
+          default
+               return empty //UNRECOGNIZED OPERATOR
+               break
+     end switch
+     return pOperator
+end csi_convertQueryOperator
+
+
+
+private command _____VALIDATORS
+end _____VALIDATORS
+function csi_checkContext pExecutionContext, @rTableName, @rTeamID
+     local tValidityA
+     
+     //PREP THE ERROR MESSAGES
+     put false into tValidityA["completed"]
+     put empty into tValidityA["response"]
+     put pExecutionContext into tValidityA["context"]
+     if tValidityA["context"] is empty then put item -2 of line 1 of the executionContexts into tValidityA["context"]
+     
+     --TEAM ID
+     if rTeamID is empty then put cdb_getTeamID(rTableName) into rTeamID
+     switch
+          case rTeamID is empty
+               put "You found a bug in the CassiaDB APIs that is not handling teamID correctly. Please report this to support@canelasoftware.com" into tValidityA["response"]
+               csi_saveResult tValidityA
+               return false //TeamID WAS EMPTY AND NO WORKING TeamID WAS SET
+               break
+               
+          case not(csi_IsValidTeamID(rTeamID))
+               put "The specified teamID does not exist:" && rTeamID into tValidityA["response"]
+               csi_saveResult tValidityA
+               return false //THEY PASSED A TeamID, BUT IT DIDNT EXIST
+               break
+     end switch
+     
+     --TABLE NAME
+     switch
+          case rTableName is empty
+               put "No cdbTableName was specified in the parameters." into tValidityA["response"]
+               csi_saveResult tValidityA
+               return false //TABLENAME WAS EMPTY AND NO WORKING DATABASENAME WAS SET
+               break
+               
+          case not(csi_IsValidTableName(rTableName,rTeamID))
+               put ("The specified table does not exist:" && rTableName) into tValidityA["response"]
+               csi_saveResult tValidityA
+               return false //THEY PASSED A TABLE, BUT IT DIDNT EXIST
+               break
+               
+          case not gCSIconfigA["CassiaDB"]["tablesLoaded"][rTableName]
+               put ("Table '" & rTableName & "' has not been loaded.") into tValidityA["response"]
+               csi_saveResult tValidityA
+               return false //CAN'T OPERATE ON TABLES THAT ARE NOT LOADED
+               break
+     end switch
+     
+     put true into tValidityA["completed"]
+     csi_saveResult tValidityA
+     return true //NONE OF THE CATCHES WERE TRIGGERED
+end csi_checkContext
+
+
+function csi_checkRecordID pExecutionContext, pRecordID, pLookLocally, pTableID, pTeamID
+     local tValidityA
+     
+     put false into tValidityA["completed"]
+     put empty into tValidityA["response"]
+     put pExecutionContext into tValidityA["context"]
+     if tValidityA["context"] is empty then put item -2 of line 1 of the executionContexts into tValidityA["context"]
+     
+     if cdb_isValidRecordID(pRecordID) is false then
+          put "The specified recordID is invalid:" && pRecordID into tValidityA["response"]
+          csi_saveResult tValidityA //THE PROVIDED RECORDID WAS NOT A UUID
+          return false
+     end if
+     
+     switch
+          case pRecordID is empty
+               put "A recordID must be specified for this call." into tValidityA["response"]
+               csi_saveResult tValidityA //THEY DID NOT PROVIDE A RECORDID
+               return false
+               break
+          case pLookLocally
+               repeat for each key xRecordID in pRecordID
+                    if gCSIdatabaseA[pTableID][char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID] is empty then
+                         put "The specified recordID does not exist:" && xRecordID into tValidityA["response"]
+                         csi_saveResult tValidityA //THE PROVIDED RECORDID DOES NOT EXIST LOCALLY
+                         return false
+                    end if
+                    
+                    if the num of elements of gCSIdatabaseA[pTableID] [char 1 to (gCSIconfigA["CassiaDB"]["recordCluster"]) of xRecordID] [xRecordID] < 1 then
+                         put "Please load your local tables before making local API calls:" && pTableID into tValidityA["response"]
+                         csi_saveResult tValidityA //DEV HAS NOT LOADED THEIR LOCAL TABLES
+                         return false
+                    end if
+               end repeat
+               break
+     end switch
+     
+     put true into tValidityA["completed"]
+     csi_saveResult tValidityA
+     return true //NONE OF THE CATCHES WERE TRIGGERED
+end csi_checkRecordID
+
+
+function csi_checkAgainstSchema pExecutionContext, pRecordA, pSchema
+     local tMultiA, tValidityA
+     
+     put false into tValidityA["completed"]
+     put empty into tValidityA["response"]
+     put pExecutionContext into tValidityA["context"]
+     if tValidityA["context"] is empty then put item -2 of line 1 of the executionContexts into tValidityA["context"]
+     
+     --IS THIS A MULTIDIMENSIONAL ARRAY
+     put csi_isMultidimentionalArray(pRecordA) into tMultiA
+               
+     --UPDATE keySizeLimit
+     put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["keySizeLimit"]),"transportDetails") into gCSIconfigA["CassiaDB"]["keySizeLimit"]
+     switch tMultiA
+          case true
+               repeat for each key xTableID in pRecordA
+                    repeat for each key xIndexKey in pRecordA[xTableID]
+                         repeat for each key xKey in pRecordA[xTableID][xIndexKey]
+                              if xKey = "cdb" or xKey = "csi" then next repeat --IGNORE THESE TWO KEYS BECAUSE THEY ARE FOR INTERNAL USE ONLY
+                              
+                              --VERIFY KEYSIZELIMIT IS NOT BEING EXCEEDED
+                              if ":HyperBlob" is not in xKey and lineOffset(xKey & ":HyperBlob",pSchema) = 0 then
+                                   if the num of chars of pRecordA[xTableID][xIndexKey][xKey] > gCSIconfigA["CassiaDB"]["keySizeLimit"] then
+                                        put false into tValidityA["completed"]
+                                        put ("Key exceeds the limit of" && gCSIconfigA["CassiaDB"]["keySizeLimit"]) into tValidityA["response"]
+                                        csi_saveResult tValidityA
+                                        return false
+                                   end if
+                              end if
+                              
+                              if lineOffset(xKey,pSchema) = 0 and lineOffset(xKey & ":HyperBlob",pSchema) = 0 then
+                                   put ("Input contained a key that was not defined in the schema:" && xKey) into tValidityA["response"]
+                                   csi_saveResult tValidityA
+                                   return false
+                              end if
+                         end repeat
+                    end repeat
+               end repeat
+               break
+               
+          case false
+               repeat for each key xKey in pRecordA
+                    if xKey = "cdb" or xKey = "csi" then next repeat --IGNORE THESE TWO KEYS BECAUSE THEY ARE FOR INTERNAL USE ONLY
+                    
+                    --VERIFY KEYSIZELIMIT IS NOT BEING EXCEEDED
+                    if ":HyperBlob" is not in xKey and lineOffset(xKey & ":HyperBlob",pSchema) = 0 then
+                         if the num of chars of pRecordA[xKey] > gCSIconfigA["CassiaDB"]["keySizeLimit"] then
+                              put false into tValidityA["completed"]
+                              put ("Key exceeds the limit of" && gCSIconfigA["CassiaDB"]["keySizeLimit"] && "chars.") into tValidityA["response"]
+                              csi_saveResult tValidityA
+                              return false
+                         end if
+                    end if
+                    
+                    if lineOffset(xKey,pSchema) = 0 and lineOffset(xKey & ":HyperBlob",pSchema) = 0 then
+                         put ("Input contained a key that was not defined in the schema:" && xKey) into tValidityA["response"]
+                         csi_saveResult tValidityA
+                         return false
+                    end if
+               end repeat
+               break
+     end switch
+     
+     return true //NONE OF THE CATCHES WERE TRIGGERED
+end csi_checkAgainstSchema
+
+
+function csi_IsValidTableName pTableName, pTeamID
+     if pTableName is an array then return true
+     set the wholeMatches to true
+     return (lineOffset(pTableName, (the keys of gCSIteamDataA[pTeamID])) <> 0)
+end csi_IsValidTableName
+
+
+function csi_IsValidTableID pTableID
+     return (pTableID is among the keys of gCSIindexTableNameA)
+end csi_IsValidTableID
+
+
+function csi_IsValidTeamID pTeamID
+     set the wholeMatches to true
+     return (csi_isUUID(pTeamID) and lineOffset(pTeamID, (the keys of gCSIteamDataA)) <> 0)
+end csi_IsValidTeamID
+
+
+function csi_isValidRecordID pInputA
+     repeat for each key xKey in pInputA
+          if not csi_isUUID(xKey) then return false
+     end repeat
+     return true
+end csi_isValidRecordID
+
+
+function csi_isUUID pUUID
+     if the num of chars of pUUID <> 36 then return false
+     return matchText(pUUID,"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+end csi_isUUID
+
+
+
+private function _____EMAIL
+end _____EMAIL
+command csi_sendEmail pInputA
+     local tErrorA, tResponse, tResult
+     
+     --SAVE RESULTS
+     put true into tErrorA["completed"]
+     put empty into tErrorA["response"]
+     put "cdb_sendEmail" into tErrorA["context"]
+     csi_saveResult tErrorA
+     
+     --GENERATE AUTH TOKEN
+     put csi_generatePHPToken(item 1 of pInputA["to"]) into pInputA["token"]
+     put "http://cassiadb.net:49154/sendemail.php" into pInputA["link"]
+     
+     --SEND EMAIL TO USER
+     repeat 3
+          put csi_HTTPUploadEmail(pInputA) into tResponse
+          put the result into tResult
+          if tResponse then exit repeat else wait 1 second
+     end repeat
+     
+     if tResponse is not "true" then
+          put false into tErrorA["completed"]
+          put tResponse into tErrorA["response"]
+          csi_saveResult tErrorA
+     end if
+end csi_sendEmail
+
+
+
+private function _____MAIL_VERIFICATION_LiveEvents_APP
+end _____MAIL_VERIFICATION_LiveEvents_APP
+function csi_generateEmailLiveEvents pUserEmail, pUserName, pRecordID
+     local tFile, tFileName, tFrom, tHeaders, tLink, tMessage, tInputA
+     local tResult, tSubject, tTeamID, tTo, tToken, tTableID, tParametersA, tTableName, tDeliverableA, tPackage
+     
+     --NEED TO GET WORKING CLIENT ID SINCE WE DO NOT KNOW IT AT THIS POINT
+     put cdb_getTeamID() into tTeamID
+     put "user" into tTableName
+     put gCSIindexTableIDA["user"] into tTableID
+     
+     --GENERATE AUTH TOKEN
+     put csi_generatePHPToken(pUserEmail) into tToken
+     
+     --BUILD ARRAY
+     put pRecordID into tInputA[tTableID][1]["cdbRecordID"]
+     put pUserEmail into tInputA[tTableID][1]["email"]
+     put pUserName into tInputA[tTableID][1]["userName"]
+     put true into tInputA[tTableID][1]["verified"]
+     
+     --FLATTEN ARRAY FOR TRANSPORT
+     put arrayEncode(tInputA) into tPackage
+     delete var tInputA
+     
+     --BASE64 ENCODE FILE
+     put base64Encode(tPackage) into tPackage
+     replace lf with empty in tPackage
+     
+     //SEND SINGLE PACKAGE
+     --BUILD PACKAGE ARRAY
+     put "createCloud" into tDeliverableA["requestType"]
+     put gCSIteamDataA[tTeamID][tTableName]["instanceResponseFolder"] into tDeliverableA["instanceResponseFolder"]
+     put tTeamID into tDeliverableA["teamID"]
+     put tTableName into tDeliverableA["tableName"]
+     put "single" into tDeliverableA["type"]
+     put tPackage into tDeliverableA["package"]
+     put the UUID() & "_" & tTeamID & "_" & "createCloud" & "_" & csi_longMilliseconds() into tDeliverableA["fileName"]
+     
+     --CORE VALUES
+     put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["sdkBuildDate"]),"transportDetails") into tDeliverableA["coreValues"]["sdkBuildDate"] --build date
+     put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["transportPipe"]),"transportDetails") into tDeliverableA["coreValues"]["transportPipe"] --disk, ram disk, socket
+     put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["transportFormat"]),"transportDetails") into tDeliverableA["coreValues"]["transportFormat"] --lson or json
+     put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["sdkPlatform"]),"transportDetails") into tDeliverableA["coreValues"]["sdkPlatform"] --liveCode, REST, Java
+     put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["clientAPIVersion"]),"transportDetails") into tDeliverableA["coreValues"]["clientAPIVersion"] --client API version
+     put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["serverAPIVersion"]),"transportDetails") into tDeliverableA["coreValues"]["serverAPIVersion"] --server API version
+     put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["keySizeLimit"]),"transportDetails") into tDeliverableA["coreValues"]["keySizeLimit"] --keySizeLimit
+     put csi_decrypt(base64Decode(gCSIconfigA["CassiaDB"]["coreValues"]["systemVersion"]),"transportDetails") into tDeliverableA["coreValues"]["systemVersion"] --MacOS 10.11.5
+     
+     --FLATTEN ARRAY FOR TRANSPORT
+     put arrayEncode(tDeliverableA) into tFile
+     put base64Encode(csi_Encrypt(tFile,"CSIcomms")) into tFile
+     
+     --CREATE LINK FOR EMAIL
+     put "http://" & "cassiadb.net:49153/activate.php?" & "&token=" & tToken & "&server=" & "Carbon" & \
+           "&csdev=" & (urlEncode(tFile)) & "&email=" & (base64Encode(pUserEmail)) & "&fn=" & (base64Encode(tDeliverableA["fileName"])) into tLink
+     replace lf with empty in tLink
+     
+     --GENERATE PARAMETERS FOR EMAIL
+     put "noReply@livecloud.io" into tFrom
+     put pUserEmail into tTo
+     put "Activate your RunRevLive.14 Conference Login" into tSubject
+     
+     put "<p>Thank you for signing up for a RunRevLive.14 Conference account:</p>" & lf & lf & \
+           "<p>To activate your account please click the URL below,</p>" & lf & lf & \
+           tLink & lf & lf & \
+           "<p>Once you have activated your account you will be able to use the app to its full potential!<p>" & lf & lf & \
+           "<p>--</p>" & lf & \
+           "If you have any issues send an email to support@canelasoftware.com" \
+           into tMessage
+     put tFrom into tInputA["from"]
+     put tSubject into tInputA["subject"]
+     put tTo into tInputA["to"]
+     put tMessage into tInputA["body"]
+     
+     --SEND EMAIL TO USER
+     cdb_sendEmail tInputA
+     if not cdb_result() then
+          return false
+     else
+          return true
+     end if
+end csi_generateEmailLiveEvents
+
+
+private function _____CONFIG
+end _____CONFIG
+private function csi_importConfig
+     local tConfigA
+     
+     put url ("file:" & csi_DirectoryPreferences() & "config") into tConfigA
+     
+     if "authKey" is not in tConfigA then
+          try
+               --CONFIG HAVE BEEN SAVED ENCRYPTED
+               put csi_decrypt(base64Decode(tConfigA),"CSIconfig") into tConfigA
+          catch tError
+               answer "There was a problem accessing config data file. Either the file is missing or you are unable to " & \
+                     "decrypt due to not including the encryption feature in LiveCode Standalone Builder." & lf & line -2 of the executionContexts with "OK"
+          end try
+     end if
+     
+     return csi_jsonToArray(tConfigA)
+end csi_importConfig
+
+
+private command csi_saveConfig pConfigA
+     --SOMETIMES HANDLERS WILL NOT WANT THE CONFIG VALUES TO BE RELOADED
+     --THEY HAVE SET NEW VALUES AND EXPECT THEM TO BE SAVED
+     if pConfigA is empty then put csi_importConfig() into pConfigA
+     
+     --REMOVE TEMPORARY DATA
+     delete var pConfigA["CassiaDB"]["tablesLoaded"]
+     
+     --CONVERT ARRAY TO JSON
+     put csi_ArrayToJSONsecure(pConfigA) into pConfigA
+     put base64Encode(csi_Encrypt(pConfigA,"CSIconfig")) into pConfigA
+     put pConfigA into url ("file:" & csi_DirectoryPreferences() & "config")
+     delete var pConfigA
+     
+     --REBUILD pConfigA["tablesLoaded"]
+     repeat for each key xTableID in gCSIdatabaseA
+          --LOOK UP tableName IN INDEX
+          put true into gCSIconfigA["CassiaDB"]["tablesLoaded"][gCSIindexTableNameA[xTableID]]
+     end repeat
+end csi_saveConfig
+
+
+
+private function _____JSON
+end _____JSON
+function csi_ArrayToJSONinsecure pInputA
+     --DEV IS TRYING TO STORE CONFIG FILE INSECURE MODE WITHOUT THE RIGHT QUALIFICATIONS
+     if csi_checkGodMode() is empty then exit csi_ArrayToJSONinsecure
+     
+     repeat for each key xKey in pInputA
+          if pInputA[xKey] is an array then
+               put "}" & csi_ArrayToJSONinsecure(pInputA[xKey]) into pInputA[xKey]
+          end if
+     end repeat
+     
+     return mergJsonEncode("pInputA","string","true")
+end csi_ArrayToJSONinsecure
+
+
+function csi_ArrayToJSONsecure pInputA
+     repeat for each key xKey in pInputA
+          if pInputA[xKey] is an array then
+               put "}" & csi_ArrayToJSONsecure(pInputA[xKey]) into pInputA[xKey]
+          end if
+     end repeat
+     
+     return mergJsonEncode("pInputA","string","true")
+end csi_ArrayToJSONsecure
+
+
+function csi_jsonToArray pJson
+     local tArrayA
+     
+     repeat for each line xKey in mergJSONdecode(pJson,"tArrayA")
+          put csi_jsonToArray(tArrayA[xKey]) into tArrayA[xKey]
+     end repeat
+     
+     return tArrayA
+end csi_jsonToArray
+
+
+private function csi_checkGodMode
+     local tPasskey
+     
+     put empty into tPasskey
+     
+     if exists(stack "dev tools") and the environment is "development" then
+          dispatch function "fetchSecureInfo" to stack "dev tools" with "passkey","CassiaStack"
+          put the result into tPasskey
+     end if
+     
+     return true
+end csi_checkGodMode
+
+
+
+private function _____ENCRYPTION
+end _____ENCRYPTION
+private function csi_encrypt pData, pType
+     switch pType
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               encrypt compress(pData) using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB AND LIVECLOUD
+               encrypt compress(pData) using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               encrypt compress(pData) using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is not empty then return empty
+               return it
+               break
+               
+          case "CDBblob"
+               encrypt pData using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is not empty then return empty
+               return base64Encode(it)
+               break
+               
+          case "CDBdoc"
+               encrypt pData using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_encrypt
+
+
+private function csi_decrypt pData, pType
+     switch pType
+          case "transportDetails"
+               --INTERNAL DETAILS ABOUT SYSTEM
+               decrypt pData using "AES256" with "3Q=N*s_p%kBRwdCzB62gjTLkcU@J4r3s"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIcomms"
+               --USED IN TRANSPORTING DATA BETWEEN CASSIADB AND LIVECLOUD
+               decrypt pData using "AES256" with "FBAWrT9Tav%YkEghb@X9zQFy6v4-32+B"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CSIconfig"
+               --NOT IN USE YET
+               decrypt pData using "AES256" with "kouSt6ebRluhouvIeMiU_lephoazouM2"
+               if the result is empty then
+                    try
+                         return decompress(it)
+                    end try
+               end if
+               break
+               
+          case "CDBblob"
+               decrypt base64Decode(pData) using "AES256" with "EFPvv$G?2$dz6#KrNdy7vZ3^4qDKdrmB"
+               if the result is empty then return it
+               break
+               
+          case "CDBdoc"
+               decrypt base64Decode(pData) using "AES256" with "nY5=z5$E+LyAAs!LR=pq#bwJM*EGqU3B"
+               if the result is empty then return it
+               break
+     end switch
+     
+     return empty //ERROR CASE
+end csi_decrypt
+
+
+private function csi_MD5 pValue
+     local tRes
+     
+     get binaryDecode("H*",md5Digest("canela" && pValue),tRes)
+     return tRes
+end csi_MD5
