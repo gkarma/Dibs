@@ -1,4 +1,4 @@
-﻿script "profileModificationsBV"
+﻿script "_profileModificationsBV"
 global gUserDataA
 
 private command ____FUNNEL

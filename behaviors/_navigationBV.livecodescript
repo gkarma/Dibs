@@ -1,4 +1,4 @@
-﻿script "navigationBV"
+﻿script "_navigationBV"
 on hiliteChanged
    switch the hilitedItem of the target
       case 1

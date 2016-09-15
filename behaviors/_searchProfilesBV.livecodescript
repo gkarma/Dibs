@@ -1,4 +1,4 @@
-﻿script "searchProfilesBV"
+﻿script "_searchProfilesBV"
 global gUserDataA
 
 private command ____FUNNEL
