@@ -1,4 +1,4 @@
-﻿script "loginCreateBV"
+﻿script "_loginCreateBV"
 global gUserDataA
 
 private command ____FUNNEL
@@ -47,7 +47,7 @@ command logMeIn
           put tDataA[tTableID][1] into gUserDataA["cdbRecordID"]
           
           --initialize the profile page's fields
-          dispatch "initializeProfilePage" to stack "profileModificationsBV"
+          dispatch "initializeProfilePage" to stack "_profileModificationsBV"
           go to cd "Profile Page"
      end if
 end logMeIn
@@ -105,7 +105,7 @@ command createAnAccount
      end if
      
      --initialize the profile page's fields
-     dispatch "initializeProfilePage" to stack "profileModificationsBV"
+     dispatch "initializeProfilePage" to stack "_profileModificationsBV"
      
      go to cd "Profile Page"
 end createAnAccount

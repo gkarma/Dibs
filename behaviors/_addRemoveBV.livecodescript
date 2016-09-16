@@ -1,4 +1,4 @@
-﻿script "addRemoveBV"
+﻿script "_addRemoveBV"
 global gUserDataA, gAddLine
 
 private command ____FUNNEL
