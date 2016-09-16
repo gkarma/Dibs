@@ -16,22 +16,23 @@ end mouseUp
 
 private command ____REMOVE
 end ____REMOVE
-command removePerson
+--REMOVING SOMEONE FROM DIBS LIST, gets called when hitting the remove button
+command removePerson 
      local tInputA, tDataA, tLine, tTableID, tMyMatches, tYourMatches
      local tMyID, tYourID, tLine1, tLine2
      lock screen
      
      --use variables for better code readability
-     put the hilitedLine of fld "Name List" of cd "Dibs List" into tLine
+     put the hilitedLine of fld "Dibs List Names" of cd "Dibs List" into tLine
      if tLine is empty then exit "removePerson"
      put gUserDataA["cdbRecordID"] into tMyID
-     put line tLine of fld "RecordID List" of cd "Dibs List" of stack "Dibs" into tYourID
+     put line tLine of fld "Dibs List IDs" of cd "Dibs List" of stack "Dibs" into tYourID
      put gUserDataA["matches"] into tMyMatches
      
      --DELETE LINES OF FIELDS AND gUserDataA's DIBS LIST
      delete line tLine of gUserDataA["dibs"]
-     delete line tLine of fld "Name List" of cd "Dibs List" of stack "Dibs"
-     delete line tLine of fld "RecordID List" of cd "Dibs List" 
+     delete line tLine of fld "Dibs List Names" of cd "Dibs List" of stack "Dibs"
+     delete line tLine of fld "Dibs List IDs" of cd "Dibs List" 
      
      --Look up user being removed's matches
      put "accounts" into tInputA["cdbTableName"]

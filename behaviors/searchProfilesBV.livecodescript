@@ -6,7 +6,7 @@ end ____FUNNEL
 on mouseUp
    switch the label of the target
       case "Search"
-         serachUsers
+         searchUsers
          break
       case "List All"
          listAllUsers
