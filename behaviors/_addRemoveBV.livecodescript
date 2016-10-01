@@ -1,14 +1,14 @@
 ﻿script "_addRemoveBV"
-global gUserDataA, gAddLine
+global gUserDataA, gHilitedLine
 
 private command ____FUNNEL
 end ____FUNNEL
 on mouseUp
    switch the label of the target
-      case "Add-button"
+      case "Add"
          addPerson
          break
-      case "Remove-button"
+      case "Remove"
          removePerson
          break
    end switch
@@ -94,9 +94,9 @@ command addPerson
      
      --User variables to better code readability
      put gUserDataA["cdbRecordID"] into tMyID
-     put line gAddLine of fld "recordIDs" of cd "Search" into tYourID
+     put line gHilitedLine of fld "recordIDs" of cd "Search" into tYourID
      put gUserDataA["name"] into tMyName
-     put line gAddLine of fld "Results" of cd "Search" into tYourName
+     put line gHilitedLine of fld "Results" of cd "Search" into tYourName
      
      --Update gUserDataA's dibs list
      put tYourID && tYourName & lf after gUserDataA["dibs"]

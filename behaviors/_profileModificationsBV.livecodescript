@@ -131,7 +131,7 @@ command uploadNewPhoto --WHEN THE UPLOAD A NEW PHOTO BUTTON IS PRESSED
      if it is empty then
           exit "uploadNewPhoto"
      end if
-     set the disabled of btn "Remove" to false
+     set the disabled of btn "Remove-button" to false
      set the visible of graphic "Rectangle" to false
      set the visible of img "camera.png" to false
      if exists(img "profPic") then
@@ -157,7 +157,7 @@ end uploadNewPhoto
 command removePhoto --WHEN THE REMOVE PHOTO BUTTON IS PRESSED
      local tInputA
      delete img "profPic"      
-     set the disabled of btn "Remove" to true
+     set the disabled of btn "Remove-button" to true
      set the visible of graphic "Rectangle" to true
      set the visible of img "camera.png" to true
      put "accounts" into tInputA["cdbTableName"]
